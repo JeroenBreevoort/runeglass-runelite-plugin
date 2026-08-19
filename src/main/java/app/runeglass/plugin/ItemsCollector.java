@@ -1,0 +1,143 @@
+/*
+ * Copyright (c) 2026, RuneGlass
+ * All rights reserved.
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+package app.runeglass.plugin;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.Nullable;
+import javax.inject.Inject;
+import javax.inject.Singleton;
+import net.runelite.api.Item;
+import net.runelite.api.ItemContainer;
+import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.gameval.InventoryID;
+import net.runelite.client.eventbus.Subscribe;
+
+/**
+ * Tracks inventory, equipment and bank contents.
+ * <p>
+ * The client reuses and mutates its {@code Item[]} arrays in place, so contents are copied into
+ * our own immutable lists the moment the event arrives. Holding a reference and reading it later
+ * from another thread would produce contents that silently change underneath us.
+ * <p>
+ * Inventory changes constantly — every item picked up, dropped, eaten or moved — so it rides on
+ * snapshots only. Equipment and bank change rarely enough to be worth an event each.
+ */
+@Singleton
+public class ItemsCollector
+{
+	private final RuneGlassConfig config;
+	private final SyncService sync;
+
+	private volatile List<RuneGlassApi.ItemStack> inventory = Collections.emptyList();
+	private volatile List<RuneGlassApi.ItemStack> equipment = Collections.emptyList();
+	/**
+	 * Only observable while the bank interface is open, so this is always "last known" rather
+	 * than live. Survives logout so the app can still show the most recent view.
+	 */
+	private volatile List<RuneGlassApi.ItemStack> bank = Collections.emptyList();
+
+	@Inject
+	ItemsCollector(RuneGlassConfig config, SyncService sync)
+	{
+		this.config = config;
+		this.sync = sync;
+	}
+
+	public void reset()
+	{
+		inventory = Collections.emptyList();
+		equipment = Collections.emptyList();
+		bank = Collections.emptyList();
+	}
+
+	@Subscribe
+	public void onItemContainerChanged(ItemContainerChanged event)
+	{
+		if (!config.syncEnabled() || !config.syncItems())
+		{
+			return;
+		}
+
+		final int id = event.getContainerId();
+		if (id != InventoryID.INV && id != InventoryID.WORN && id != InventoryID.BANK)
+		{
+			return;
+		}
+
+		final List<RuneGlassApi.ItemStack> items = copyOf(event.getItemContainer());
+
+		if (id == InventoryID.INV)
+		{
+			inventory = items;
+			return; // snapshot only — far too noisy to be an event
+		}
+
+		if (id == InventoryID.WORN)
+		{
+			equipment = items;
+			emitContainerEvent("WORN", items);
+		}
+		else
+		{
+			bank = items;
+			emitContainerEvent("BANK", items);
+		}
+	}
+
+	private void emitContainerEvent(String container, List<RuneGlassApi.ItemStack> items)
+	{
+		final Map<String, Object> data = new HashMap<>();
+		data.put("container", container);
+		data.put("items", items);
+		sync.record(RuneGlassApi.Kind.CONTAINER, data);
+	}
+
+	/**
+	 * Snapshots the container into immutable stacks. Empty slots are dropped; the slot index is
+	 * kept so equipment slots stay meaningful.
+	 */
+	private static List<RuneGlassApi.ItemStack> copyOf(@Nullable ItemContainer container)
+	{
+		if (container == null)
+		{
+			return Collections.emptyList();
+		}
+
+		final Item[] items = container.getItems();
+		final List<RuneGlassApi.ItemStack> copy = new ArrayList<>(items.length);
+
+		for (int slot = 0; slot < items.length; slot++)
+		{
+			final Item item = items[slot];
+			if (item == null || item.getId() < 0 || item.getQuantity() <= 0)
+			{
+				continue;
+			}
+			copy.add(new RuneGlassApi.ItemStack(item.getId(), item.getQuantity(), slot));
+		}
+
+		return Collections.unmodifiableList(copy);
+	}
+
+	public List<RuneGlassApi.ItemStack> getInventory()
+	{
+		return inventory;
+	}
+
+	public List<RuneGlassApi.ItemStack> getEquipment()
+	{
+		return equipment;
+	}
+
+	public List<RuneGlassApi.ItemStack> getBank()
+	{
+		return bank;
+	}
+}

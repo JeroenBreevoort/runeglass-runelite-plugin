@@ -21,7 +21,9 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.api.events.GameTick;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -55,8 +57,27 @@ public class RuneGlassPlugin extends Plugin
 	@Inject
 	private SyncService syncService;
 
+	@Inject
+	private EventBus eventBus;
+
+	@Inject
+	private SkillsCollector skillsCollector;
+
+	@Inject
+	private ItemsCollector itemsCollector;
+
+	@Inject
+	private SnapshotBuilder snapshotBuilder;
+
 	private RuneGlassPanel panel;
 	private NavigationButton navButton;
+
+	/** Game ticks are 600ms, so this is a snapshot roughly every 60 seconds. */
+	private static final int SNAPSHOT_TICKS = 100;
+	/** First snapshot of a session lands sooner, once containers have populated. */
+	private static final int FIRST_SNAPSHOT_TICKS = 10;
+
+	private int ticksUntilSnapshot = SNAPSHOT_TICKS;
 
 	/**
 	 * Last identity we observed. Written on the client thread, read from the panel's Swing thread,
@@ -87,6 +108,10 @@ public class RuneGlassPlugin extends Plugin
 		syncService.setListener(panel::onSyncStatusChanged);
 		syncService.startUp();
 
+		// Collectors live in their own classes, so they need registering explicitly.
+		eventBus.register(skillsCollector);
+		eventBus.register(itemsCollector);
+
 		// Picks up an account that is already logged in when the plugin is toggled on mid-session.
 		clientThread.invokeLater(this::refreshIdentity);
 
@@ -96,6 +121,9 @@ public class RuneGlassPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		eventBus.unregister(skillsCollector);
+		eventBus.unregister(itemsCollector);
+
 		// Cancel in-flight work without blocking; RuneLite owns the executor itself.
 		pairingService.shutdown();
 		syncService.shutDown();
@@ -137,6 +165,24 @@ public class RuneGlassPlugin extends Plugin
 			// getAccountHash() goes back to -1 here; stop attributing anything to the old account.
 			setIdentity(null);
 		}
+	}
+
+	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		if (identity == null || !config.syncEnabled() || config.deviceToken().isEmpty())
+		{
+			return;
+		}
+
+		if (--ticksUntilSnapshot > 0)
+		{
+			return;
+		}
+
+		ticksUntilSnapshot = SNAPSHOT_TICKS;
+		// Built here because only the client thread may read the game client.
+		syncService.submitSnapshot(snapshotBuilder.build());
 	}
 
 	/**
@@ -188,7 +234,11 @@ public class RuneGlassPlugin extends Plugin
 
 		if (next != null)
 		{
+			// Baselines are per character; comparing levels across accounts would invent level ups.
+			skillsCollector.reset();
+			itemsCollector.reset();
 			syncService.startSession(next);
+			ticksUntilSnapshot = FIRST_SNAPSHOT_TICKS;
 		}
 		else if (previous != null)
 		{
