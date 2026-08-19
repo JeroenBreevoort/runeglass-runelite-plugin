@@ -1,0 +1,18 @@
+.gradle/
+build/
+out/
+bin/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Machine-specific: pins the Gradle daemon to a JDK that Gradle 8.10 supports.
+# See README.md — generate with `./scripts/local-setup.sh`.
+gradle.properties
+
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.DS_Store
