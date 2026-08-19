@@ -14,21 +14,23 @@ import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.swing.BorderFactory;
+import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.LinkBrowser;
 
 /**
- * Side panel showing link state and what RuneGlass currently sees.
+ * Side panel showing link state, the pairing code, and what RuneGlass currently sees.
  * <p>
- * Every public entry point may be called from the client thread, so each one hops to the EDT
- * before touching Swing state.
+ * Public entry points may be called from the client thread or an OkHttp thread, so each one hops
+ * to the EDT before touching Swing state. Everything private assumes it is already on the EDT.
  */
 @Singleton
 public class RuneGlassPanel extends PluginPanel
@@ -36,31 +38,45 @@ public class RuneGlassPanel extends PluginPanel
 	private static final String PRIVACY_URL = "https://runeglass.app/privacy";
 
 	private final RuneGlassConfig config;
+	private final PairingService pairingService;
 
 	private final JLabel linkValue = new JLabel();
 	private final JLabel characterValue = new JLabel();
 	private final JLabel syncValue = new JLabel();
-	private final JButton actionButton = new JButton();
+
+	private final JPanel pairingCard = new JPanel();
+	private final JLabel pairingCode = new JLabel();
+	private final JLabel pairingHint = new JLabel();
+	private final JLabel pairingExpiry = new JLabel();
+
+	private final JLabel messageLabel = new JLabel();
+	private final JButton primaryButton = new JButton();
+	private final JButton cancelButton = new JButton("Cancel");
+
+	/** Ticks the "expires in" countdown while a code is on screen. EDT-only. */
+	private final Timer countdown = new Timer(1000, e -> updateCountdown());
+
+	private long expiresAt;
 
 	@Inject
-	RuneGlassPanel(RuneGlassConfig config)
+	RuneGlassPanel(RuneGlassConfig config, PairingService pairingService)
 	{
 		this.config = config;
+		this.pairingService = pairingService;
 
-		setLayout(new BorderLayout(0, 12));
+		setLayout(new BorderLayout(0, 10));
 		setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
 		add(buildHeader(), BorderLayout.NORTH);
-		add(buildStatus(), BorderLayout.CENTER);
+		add(buildBody(), BorderLayout.CENTER);
 		add(buildFooter(), BorderLayout.SOUTH);
 
-		refresh();
+		render(pairingService.getState());
 	}
 
 	private JPanel buildHeader()
 	{
 		final JPanel header = new JPanel(new BorderLayout());
-		header.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
 
 		final JLabel title = new JLabel("RuneGlass");
 		title.setFont(FontManager.getRunescapeBoldFont());
@@ -70,25 +86,73 @@ public class RuneGlassPanel extends PluginPanel
 		return header;
 	}
 
-	private JPanel buildStatus()
+	private JPanel buildBody()
 	{
-		final JPanel rows = new JPanel();
-		rows.setLayout(new BoxLayout(rows, BoxLayout.Y_AXIS));
+		final JPanel body = new JPanel();
+		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
 
-		rows.add(statusRow("Account", linkValue));
-		rows.add(statusRow("Character", characterValue));
-		rows.add(statusRow("Sync", syncValue));
+		body.add(statusRow("Account", linkValue));
+		body.add(statusRow("Character", characterValue));
+		body.add(statusRow("Sync", syncValue));
+
+		body.add(Box.createVerticalStrut(8));
+		body.add(buildPairingCard());
+
+		messageLabel.setFont(FontManager.getRunescapeSmallFont());
+		messageLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+		messageLabel.setVisible(false);
+		body.add(Box.createVerticalStrut(6));
+		body.add(messageLabel);
 
 		final JPanel wrapper = new JPanel(new BorderLayout());
-		wrapper.add(rows, BorderLayout.NORTH);
+		wrapper.add(body, BorderLayout.NORTH);
 		return wrapper;
+	}
+
+	private JPanel buildPairingCard()
+	{
+		pairingCard.setLayout(new BoxLayout(pairingCard, BoxLayout.Y_AXIS));
+		pairingCard.setAlignmentX(Component.LEFT_ALIGNMENT);
+		pairingCard.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createLineBorder(ColorScheme.DARK_GRAY_HOVER_COLOR),
+			BorderFactory.createEmptyBorder(10, 8, 10, 8)));
+		pairingCard.setVisible(false);
+
+		pairingHint.setText("<html>Enter this code in the RuneGlass app</html>");
+		pairingHint.setFont(FontManager.getRunescapeSmallFont());
+		pairingHint.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		pairingHint.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+		pairingCode.setFont(new Font(Font.MONOSPACED, Font.BOLD, 22));
+		pairingCode.setForeground(ColorScheme.BRAND_ORANGE);
+		pairingCode.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+		pairingExpiry.setFont(FontManager.getRunescapeSmallFont());
+		pairingExpiry.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+		pairingExpiry.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+		cancelButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+		cancelButton.setFocusPainted(false);
+		cancelButton.setFont(cancelButton.getFont().deriveFont(Font.PLAIN, 10f));
+		cancelButton.addActionListener(e -> pairingService.cancel());
+
+		pairingCard.add(pairingHint);
+		pairingCard.add(Box.createVerticalStrut(6));
+		pairingCard.add(pairingCode);
+		pairingCard.add(Box.createVerticalStrut(4));
+		pairingCard.add(pairingExpiry);
+		pairingCard.add(Box.createVerticalStrut(8));
+		pairingCard.add(cancelButton);
+
+		return pairingCard;
 	}
 
 	private JPanel statusRow(String label, JLabel value)
 	{
 		final JPanel row = new JPanel(new GridLayout(1, 2, 6, 0));
-		row.setBorder(BorderFactory.createEmptyBorder(4, 0, 4, 0));
-		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		row.setBorder(BorderFactory.createEmptyBorder(3, 0, 3, 0));
+		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
+		row.setAlignmentX(Component.LEFT_ALIGNMENT);
 
 		final JLabel key = new JLabel(label);
 		key.setFont(FontManager.getRunescapeSmallFont());
@@ -107,9 +171,9 @@ public class RuneGlassPanel extends PluginPanel
 		final JPanel footer = new JPanel();
 		footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
 
-		actionButton.setAlignmentX(Component.CENTER_ALIGNMENT);
-		actionButton.setFocusPainted(false);
-		actionButton.addActionListener(e -> onActionClicked());
+		primaryButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+		primaryButton.setFocusPainted(false);
+		primaryButton.addActionListener(e -> onPrimaryClicked());
 
 		final JButton privacy = new JButton("Privacy policy");
 		privacy.setAlignmentX(Component.CENTER_ALIGNMENT);
@@ -117,15 +181,17 @@ public class RuneGlassPanel extends PluginPanel
 		privacy.setFont(privacy.getFont().deriveFont(Font.PLAIN, 10f));
 		privacy.addActionListener(e -> LinkBrowser.browse(PRIVACY_URL));
 
-		footer.add(actionButton);
-		footer.add(javax.swing.Box.createVerticalStrut(6));
+		footer.add(primaryButton);
+		footer.add(Box.createVerticalStrut(6));
 		footer.add(privacy);
 		return footer;
 	}
 
-	/**
-	 * Called from the client thread when the logged-in account changes.
-	 */
+	// ------------------------------------------------------------------
+	// Entry points from other threads
+	// ------------------------------------------------------------------
+
+	/** Called from the client thread when the logged-in account changes. */
 	public void onIdentityChanged(@Nullable AccountIdentity identity)
 	{
 		SwingUtilities.invokeLater(() -> {
@@ -140,48 +206,101 @@ public class RuneGlassPanel extends PluginPanel
 				characterValue.setText(name != null ? name : "Unknown");
 				characterValue.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
 			}
-
-			updateSyncRow();
 		});
 	}
 
-	/**
-	 * Re-reads config-backed state. Safe to call from any thread.
-	 */
+	/** Called from an OkHttp thread as the pairing handshake progresses. */
+	public void onPairingStateChanged(PairingState state)
+	{
+		SwingUtilities.invokeLater(() -> render(state));
+	}
+
+	/** Called when settings change, so the sync row reflects the new toggle. */
 	public void refresh()
 	{
-		SwingUtilities.invokeLater(() -> {
-			final boolean linked = !config.deviceToken().isEmpty();
-
-			if (linked)
-			{
-				final String name = config.linkedAccountName();
-				linkValue.setText(name.isEmpty() ? "Linked" : name);
-				linkValue.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
-				actionButton.setText("Unlink");
-			}
-			else
-			{
-				linkValue.setText("Not linked");
-				linkValue.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
-				actionButton.setText("Link account");
-			}
-
-			characterValue.setText("Not logged in");
-			characterValue.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
-
-			updateSyncRow();
-		});
+		SwingUtilities.invokeLater(() -> render(pairingService.getState()));
 	}
 
-	private void updateSyncRow()
+	// ------------------------------------------------------------------
+	// EDT-only rendering
+	// ------------------------------------------------------------------
+
+	private void render(PairingState state)
+	{
+		final boolean linked = !config.deviceToken().isEmpty();
+
+		if (linked)
+		{
+			final String name = config.linkedAccountName();
+			linkValue.setText(name.isEmpty() ? "Linked" : name);
+			linkValue.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
+		}
+		else
+		{
+			linkValue.setText("Not linked");
+			linkValue.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+		}
+
+		updateSyncRow(linked);
+
+		switch (state.getPhase())
+		{
+			case STARTING:
+				hidePairingCard();
+				showMessage("Requesting a code…", ColorScheme.LIGHT_GRAY_COLOR);
+				primaryButton.setText("Link account");
+				primaryButton.setEnabled(false);
+				break;
+
+			case WAITING:
+				expiresAt = state.getExpiresAt();
+				pairingCode.setText(state.getCode());
+				pairingCard.setVisible(true);
+				updateCountdown();
+				if (!countdown.isRunning())
+				{
+					countdown.start();
+				}
+				hideMessage();
+				primaryButton.setText("Link account");
+				primaryButton.setEnabled(false);
+				break;
+
+			case LINKED:
+				hidePairingCard();
+				showMessage("Linked successfully.", ColorScheme.PROGRESS_COMPLETE_COLOR);
+				primaryButton.setText("Unlink");
+				primaryButton.setEnabled(true);
+				break;
+
+			case FAILED:
+				hidePairingCard();
+				showMessage(state.getMessage(), ColorScheme.PROGRESS_ERROR_COLOR);
+				primaryButton.setText(linked ? "Unlink" : "Link account");
+				primaryButton.setEnabled(true);
+				break;
+
+			case IDLE:
+			default:
+				hidePairingCard();
+				hideMessage();
+				primaryButton.setText(linked ? "Unlink" : "Link account");
+				primaryButton.setEnabled(true);
+				break;
+		}
+
+		revalidate();
+		repaint();
+	}
+
+	private void updateSyncRow(boolean linked)
 	{
 		if (!config.syncEnabled())
 		{
 			syncValue.setText("Off");
 			syncValue.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
 		}
-		else if (config.deviceToken().isEmpty())
+		else if (!linked)
 		{
 			syncValue.setText("Needs linking");
 			syncValue.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
@@ -193,14 +312,61 @@ public class RuneGlassPanel extends PluginPanel
 		}
 	}
 
-	private void onActionClicked()
+	private void updateCountdown()
 	{
-		// Pairing lands in the next milestone; this keeps the unlink path honest in the meantime.
+		final long remaining = expiresAt - System.currentTimeMillis();
+		if (remaining <= 0)
+		{
+			pairingExpiry.setText("Expired");
+			countdown.stop();
+			return;
+		}
+
+		final long seconds = remaining / 1000L;
+		pairingExpiry.setText(String.format("Expires in %d:%02d", seconds / 60, seconds % 60));
+	}
+
+	private void hidePairingCard()
+	{
+		countdown.stop();
+		pairingCard.setVisible(false);
+	}
+
+	private void showMessage(@Nullable String text, java.awt.Color color)
+	{
+		if (text == null || text.isEmpty())
+		{
+			hideMessage();
+			return;
+		}
+
+		// HTML so long server messages wrap inside the narrow panel instead of clipping.
+		messageLabel.setText("<html><body style='width:150px'>" + escape(text) + "</body></html>");
+		messageLabel.setForeground(color);
+		messageLabel.setVisible(true);
+	}
+
+	private void hideMessage()
+	{
+		messageLabel.setVisible(false);
+		messageLabel.setText("");
+	}
+
+	private void onPrimaryClicked()
+	{
 		if (!config.deviceToken().isEmpty())
 		{
-			config.deviceToken("");
-			config.linkedAccountName("");
-			refresh();
+			pairingService.unlink();
 		}
+		else
+		{
+			pairingService.start();
+		}
+	}
+
+	/** Server-supplied text lands in an HTML label, so angle brackets must not become markup. */
+	private static String escape(String text)
+	{
+		return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
 	}
 }

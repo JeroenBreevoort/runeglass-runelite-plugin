@@ -21,6 +21,7 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -48,6 +49,9 @@ public class RuneGlassPlugin extends Plugin
 	@Inject
 	private ClientToolbar clientToolbar;
 
+	@Inject
+	private PairingService pairingService;
+
 	private RuneGlassPanel panel;
 	private NavigationButton navButton;
 
@@ -72,6 +76,8 @@ public class RuneGlassPlugin extends Plugin
 
 		clientToolbar.addNavigation(navButton);
 
+		pairingService.setListener(panel::onPairingStateChanged);
+
 		// Picks up an account that is already logged in when the plugin is toggled on mid-session.
 		clientThread.invokeLater(this::refreshIdentity);
 
@@ -81,12 +87,30 @@ public class RuneGlassPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		// Cancels in-flight polling without blocking; RuneLite owns the executor itself.
+		pairingService.shutdown();
+
 		clientToolbar.removeNavigation(navButton);
 		navButton = null;
 		panel = null;
 		identity = null;
 
 		log.info("RuneGlass stopped");
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (!RuneGlassConfig.GROUP.equals(event.getGroup()))
+		{
+			return;
+		}
+
+		final RuneGlassPanel p = panel;
+		if (p != null)
+		{
+			p.refresh();
+		}
 	}
 
 	@Subscribe
