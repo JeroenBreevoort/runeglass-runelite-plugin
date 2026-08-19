@@ -47,6 +47,20 @@ that stands in for the phone app claiming it.
 
 `GET /dev/state` dumps everything the mock has received.
 
+## Tests
+
+```sh
+./gradlew test
+```
+
+Unit tests cover the pairing state machine, the retryable/terminal error split, and the account
+hash string conversion.
+
+`PairingIntegrationTest` drives the real HTTP client against the mock, so the Java DTOs and the
+mock's JSON field names are checked against each other rather than assumed to agree. It **skips
+itself** when the mock isn't running, so `./gradlew test` stays green either way — start the mock
+first if you want it to actually execute.
+
 ## Layout
 
 | Path | What it is |
