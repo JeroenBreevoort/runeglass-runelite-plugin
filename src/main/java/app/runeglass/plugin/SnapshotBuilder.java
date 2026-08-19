@@ -21,15 +21,17 @@ public class SnapshotBuilder
 	private final SkillsCollector skills;
 	private final ItemsCollector items;
 	private final ProgressCollector progress;
+	private final CollectionLogCollector collectionLog;
 
 	@Inject
 	SnapshotBuilder(RuneGlassConfig config, SkillsCollector skills, ItemsCollector items,
-		ProgressCollector progress)
+		ProgressCollector progress, CollectionLogCollector collectionLog)
 	{
 		this.config = config;
 		this.skills = skills;
 		this.items = items;
 		this.progress = progress;
+		this.collectionLog = collectionLog;
 	}
 
 	/**
@@ -56,6 +58,7 @@ public class SnapshotBuilder
 		{
 			snapshot.quests = progress.getQuests();
 			snapshot.varbits = progress.getVarbits();
+			snapshot.collectionLog = collectionLog.buildSummary();
 		}
 
 		return snapshot;

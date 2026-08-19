@@ -73,6 +73,9 @@ public class RuneGlassPlugin extends Plugin
 	private ProgressCollector progressCollector;
 
 	@Inject
+	private CollectionLogCollector collectionLogCollector;
+
+	@Inject
 	private SnapshotBuilder snapshotBuilder;
 
 	private RuneGlassPanel panel;
@@ -119,6 +122,7 @@ public class RuneGlassPlugin extends Plugin
 		eventBus.register(itemsCollector);
 		eventBus.register(lootCollector);
 		eventBus.register(progressCollector);
+		eventBus.register(collectionLogCollector);
 
 		// Picks up an account that is already logged in when the plugin is toggled on mid-session.
 		clientThread.invokeLater(this::refreshIdentity);
@@ -133,6 +137,7 @@ public class RuneGlassPlugin extends Plugin
 		eventBus.unregister(itemsCollector);
 		eventBus.unregister(lootCollector);
 		eventBus.unregister(progressCollector);
+		eventBus.unregister(collectionLogCollector);
 
 		// Cancel in-flight work without blocking; RuneLite owns the executor itself.
 		pairingService.shutdown();
@@ -257,6 +262,7 @@ public class RuneGlassPlugin extends Plugin
 			itemsCollector.reset();
 			lootCollector.reset();
 			progressCollector.reset();
+			collectionLogCollector.reset();
 			syncService.startSession(next);
 			ticksUntilSnapshot = FIRST_SNAPSHOT_TICKS;
 		}

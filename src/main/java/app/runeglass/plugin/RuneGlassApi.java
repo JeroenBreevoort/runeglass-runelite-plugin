@@ -107,6 +107,13 @@ public final class RuneGlassApi
 		}
 	}
 
+	/**
+	 * Full state at a point in time.
+	 * <p>
+	 * The backend keeps only the most recent snapshot per character rather than a history — the
+	 * timeline is carried by events, and storing one document per minute per character grows
+	 * without bound for little benefit. Treat ingesting a snapshot as a replace, not an append.
+	 */
 	public static final class Snapshot
 	{
 		public long capturedAt;
@@ -117,6 +124,11 @@ public final class RuneGlassApi
 		public List<ItemStack> bank;
 		public Map<String, String> quests;
 		public Map<String, Integer> varbits;
+		/**
+		 * Collection log pages the player has opened, plus whether in-game unlock messages are on.
+		 * Categories never opened are absent rather than empty — "not seen" is not "nothing found".
+		 */
+		public Map<String, Object> collectionLog;
 	}
 
 	public static final class ItemStack

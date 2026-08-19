@@ -93,22 +93,39 @@ is turned on.
 | Diaries | `VarbitChanged` | On completion | All 48 tiers |
 | Combat achievements | `VarbitChanged` | On tier change | All 6 tiers |
 | Quests | Polled per snapshot | On state transition | All quest states |
+| Collection log | `ChatMessage`, `COLLECTION_DRAW_LIST` | On unlock | Pages the player has opened |
 
 The bank is snapshot-only for a concrete reason: a full bank serializes to roughly 80 KB, and a
 batch of a hundred such events is around 8 MiB — eight times Convex's 1 MiB document limit. A bank
 change instead brings the next snapshot forward, so the contents travel once. `SyncService` also
 enforces a byte budget per request, so no future event type can reintroduce the problem.
 
-**Not yet implemented: the collection log.** Its contents are spread across thousands of
-per-item varbits and are only fully readable while the log interface is open, so it needs its own
-design rather than being bolted onto the varbit table. Everything else in the planned v1 scope is
-in place.
+The collection log works two ways, because neither alone is sufficient. **New unlocks** come from
+the game's own chat message, which arrives whether or not the log is open — this is the real-time
+path. **Bulk state** is scraped when the player opens a page, since that is the only moment its
+contents exist to be read.
+
+Two consequences worth knowing:
+
+- Categories the player has never opened are **absent** from the snapshot, not empty. "Not yet
+  seen" and "nothing obtained" are very different claims and the app must not conflate them.
+- The chat message depends on the in-game *collection log notification* option. When it is off,
+  unlocks are only noticed the next time that page is opened, so the snapshot reports
+  `notificationsEnabled` and the app can prompt rather than appearing stale.
 
 Two deliberate exclusions:
 
 - **PvP loot** (`LootRecordType.PLAYER`) is never collected — a kill record necessarily
   identifies the opponent.
 - **`Skill.OVERALL`** is skipped, being derived from the other skills rather than earned.
+
+## Backend expectations
+
+- **Snapshots replace, they do not append.** Keep only the most recent snapshot per character;
+  the timeline is carried by events. Storing one document per minute per character grows without
+  bound for little benefit.
+- **Ingest is idempotent per `(sessionId, seq)`.** A retried batch after a network blip must not
+  double-count, and a gap in the sequence is a real signal that data was dropped.
 
 ## Things that will bite you
 
