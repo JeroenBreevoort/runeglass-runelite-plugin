@@ -74,6 +74,33 @@ first if you want it to actually execute.
 `RuneGlassApi.java` and `tools/mock-server/server.js` mirror each other. Change them together, and
 keep the Convex implementation in step.
 
+## What gets collected
+
+Each domain has its own toggle, and all of them are inert until the master **Enable sync** switch
+is turned on.
+
+| Domain | Source | Sent as an event | In snapshots |
+| --- | --- | --- | --- |
+| Skills | `StatChanged` | Level ups only | Experience for all 23 skills |
+| Inventory | `ItemContainerChanged` | Never — far too noisy | Full contents |
+| Equipment | `ItemContainerChanged` | On change | Full contents |
+| Bank | `ItemContainerChanged` | On change | Last known |
+| Loot | `NpcLootReceived`, `LootReceived` | Every drop, with session kill count | — |
+| Diaries | `VarbitChanged` | On completion | All 48 tiers |
+| Combat achievements | `VarbitChanged` | On tier change | All 6 tiers |
+| Quests | Polled per snapshot | On state transition | All quest states |
+
+**Not yet implemented: the collection log.** Its contents are spread across thousands of
+per-item varbits and are only fully readable while the log interface is open, so it needs its own
+design rather than being bolted onto the varbit table. Everything else in the planned v1 scope is
+in place.
+
+Two deliberate exclusions:
+
+- **PvP loot** (`LootRecordType.PLAYER`) is never collected — a kill record necessarily
+  identifies the opponent.
+- **`Skill.OVERALL`** is skipped, being derived from the other skills rather than earned.
+
 ## Things that will bite you
 
 - **`accountHash` is a 64-bit `long`.** It travels as a *decimal string*, never a JSON number —

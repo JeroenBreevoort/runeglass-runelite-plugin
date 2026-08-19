@@ -67,6 +67,12 @@ public class RuneGlassPlugin extends Plugin
 	private ItemsCollector itemsCollector;
 
 	@Inject
+	private LootCollector lootCollector;
+
+	@Inject
+	private ProgressCollector progressCollector;
+
+	@Inject
 	private SnapshotBuilder snapshotBuilder;
 
 	private RuneGlassPanel panel;
@@ -111,6 +117,8 @@ public class RuneGlassPlugin extends Plugin
 		// Collectors live in their own classes, so they need registering explicitly.
 		eventBus.register(skillsCollector);
 		eventBus.register(itemsCollector);
+		eventBus.register(lootCollector);
+		eventBus.register(progressCollector);
 
 		// Picks up an account that is already logged in when the plugin is toggled on mid-session.
 		clientThread.invokeLater(this::refreshIdentity);
@@ -123,6 +131,8 @@ public class RuneGlassPlugin extends Plugin
 	{
 		eventBus.unregister(skillsCollector);
 		eventBus.unregister(itemsCollector);
+		eventBus.unregister(lootCollector);
+		eventBus.unregister(progressCollector);
 
 		// Cancel in-flight work without blocking; RuneLite owns the executor itself.
 		pairingService.shutdown();
@@ -181,6 +191,11 @@ public class RuneGlassPlugin extends Plugin
 		}
 
 		ticksUntilSnapshot = SNAPSHOT_TICKS;
+
+		// Quests have no change event, so they are polled and diffed here, before the snapshot
+		// is assembled from what the collectors last saw.
+		progressCollector.refresh();
+
 		// Built here because only the client thread may read the game client.
 		syncService.submitSnapshot(snapshotBuilder.build());
 	}
@@ -237,6 +252,8 @@ public class RuneGlassPlugin extends Plugin
 			// Baselines are per character; comparing levels across accounts would invent level ups.
 			skillsCollector.reset();
 			itemsCollector.reset();
+			lootCollector.reset();
+			progressCollector.reset();
 			syncService.startSession(next);
 			ticksUntilSnapshot = FIRST_SNAPSHOT_TICKS;
 		}

@@ -20,13 +20,16 @@ public class SnapshotBuilder
 	private final RuneGlassConfig config;
 	private final SkillsCollector skills;
 	private final ItemsCollector items;
+	private final ProgressCollector progress;
 
 	@Inject
-	SnapshotBuilder(RuneGlassConfig config, SkillsCollector skills, ItemsCollector items)
+	SnapshotBuilder(RuneGlassConfig config, SkillsCollector skills, ItemsCollector items,
+		ProgressCollector progress)
 	{
 		this.config = config;
 		this.skills = skills;
 		this.items = items;
+		this.progress = progress;
 	}
 
 	/**
@@ -47,6 +50,12 @@ public class SnapshotBuilder
 			snapshot.inventory = items.getInventory();
 			snapshot.equipment = items.getEquipment();
 			snapshot.bank = items.getBank();
+		}
+
+		if (config.syncProgress())
+		{
+			snapshot.quests = progress.getQuests();
+			snapshot.varbits = progress.getVarbits();
 		}
 
 		return snapshot;

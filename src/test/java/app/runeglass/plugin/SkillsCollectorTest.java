@@ -156,6 +156,8 @@ public class SkillsCollectorTest
 		boolean syncEnabled = true;
 		boolean syncSkills = true;
 		boolean syncItems = true;
+		boolean syncLoot = true;
+		boolean syncProgress = true;
 
 		@Override
 		public boolean syncEnabled()
@@ -173,6 +175,18 @@ public class SkillsCollectorTest
 		public boolean syncItems()
 		{
 			return syncItems;
+		}
+
+		@Override
+		public boolean syncLoot()
+		{
+			return syncLoot;
+		}
+
+		@Override
+		public boolean syncProgress()
+		{
+			return syncProgress;
 		}
 
 		@Override
