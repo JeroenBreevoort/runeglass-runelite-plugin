@@ -58,6 +58,9 @@ public class RuneGlassPanel extends PluginPanel
 
 	private long expiresAt;
 
+	/** Latest status from the sync loop. EDT-only; null until the first update arrives. */
+	private SyncStatus syncStatus;
+
 	@Inject
 	RuneGlassPanel(RuneGlassConfig config, PairingService pairingService)
 	{
@@ -215,6 +218,15 @@ public class RuneGlassPanel extends PluginPanel
 		SwingUtilities.invokeLater(() -> render(state));
 	}
 
+	/** Called from the executor thread as the sync loop makes progress. */
+	public void onSyncStatusChanged(SyncStatus status)
+	{
+		SwingUtilities.invokeLater(() -> {
+			syncStatus = status;
+			updateSyncRow();
+		});
+	}
+
 	/** Called when settings change, so the sync row reflects the new toggle. */
 	public void refresh()
 	{
@@ -241,7 +253,7 @@ public class RuneGlassPanel extends PluginPanel
 			linkValue.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
 		}
 
-		updateSyncRow(linked);
+		updateSyncRow();
 
 		switch (state.getPhase())
 		{
@@ -293,23 +305,73 @@ public class RuneGlassPanel extends PluginPanel
 		repaint();
 	}
 
-	private void updateSyncRow(boolean linked)
+	private void updateSyncRow()
 	{
-		if (!config.syncEnabled())
+		final SyncStatus status = syncStatus;
+
+		// Before the first status arrives, derive what we can from settings alone.
+		if (status == null)
 		{
-			syncValue.setText("Off");
-			syncValue.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+			if (!config.syncEnabled())
+			{
+				setSync("Off", ColorScheme.MEDIUM_GRAY_COLOR, null);
+			}
+			else if (config.deviceToken().isEmpty())
+			{
+				setSync("Needs linking", ColorScheme.PROGRESS_INPROGRESS_COLOR, null);
+			}
+			else
+			{
+				setSync("Starting…", ColorScheme.MEDIUM_GRAY_COLOR, null);
+			}
+			return;
 		}
-		else if (!linked)
+
+		switch (status.getPhase())
 		{
-			syncValue.setText("Needs linking");
-			syncValue.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+			case OFF:
+				setSync("Off", ColorScheme.MEDIUM_GRAY_COLOR, null);
+				break;
+			case NOT_LINKED:
+				setSync("Needs linking", ColorScheme.PROGRESS_INPROGRESS_COLOR, null);
+				break;
+			case WAITING_FOR_LOGIN:
+				setSync("Waiting for login", ColorScheme.MEDIUM_GRAY_COLOR, null);
+				break;
+			case PENDING:
+				setSync("Sending " + status.getPendingCount(), ColorScheme.PROGRESS_INPROGRESS_COLOR, null);
+				break;
+			case ERROR:
+				setSync("Error", ColorScheme.PROGRESS_ERROR_COLOR, status.getMessage());
+				break;
+			case IDLE:
+			default:
+				setSync("Synced", ColorScheme.PROGRESS_COMPLETE_COLOR, lastSyncTooltip(status));
+				break;
 		}
-		else
+	}
+
+	private void setSync(String text, java.awt.Color color, @Nullable String tooltip)
+	{
+		syncValue.setText(text);
+		syncValue.setForeground(color);
+		syncValue.setToolTipText(tooltip);
+	}
+
+	@Nullable
+	private static String lastSyncTooltip(SyncStatus status)
+	{
+		if (status.getLastSuccessAt() <= 0)
 		{
-			syncValue.setText("Idle");
-			syncValue.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
+			return null;
 		}
+
+		final long seconds = (System.currentTimeMillis() - status.getLastSuccessAt()) / 1000L;
+		if (seconds < 60)
+		{
+			return "Last sync " + seconds + "s ago";
+		}
+		return "Last sync " + (seconds / 60) + "m ago";
 	}
 
 	private void updateCountdown()

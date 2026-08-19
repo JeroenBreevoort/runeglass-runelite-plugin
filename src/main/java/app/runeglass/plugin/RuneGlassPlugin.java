@@ -52,6 +52,9 @@ public class RuneGlassPlugin extends Plugin
 	@Inject
 	private PairingService pairingService;
 
+	@Inject
+	private SyncService syncService;
+
 	private RuneGlassPanel panel;
 	private NavigationButton navButton;
 
@@ -76,7 +79,13 @@ public class RuneGlassPlugin extends Plugin
 
 		clientToolbar.addNavigation(navButton);
 
-		pairingService.setListener(panel::onPairingStateChanged);
+		pairingService.setListener(state -> {
+			panel.onPairingStateChanged(state);
+			// A fresh link clears any rejected-token state left over from the previous one.
+			syncService.onLinkChanged();
+		});
+		syncService.setListener(panel::onSyncStatusChanged);
+		syncService.startUp();
 
 		// Picks up an account that is already logged in when the plugin is toggled on mid-session.
 		clientThread.invokeLater(this::refreshIdentity);
@@ -87,8 +96,9 @@ public class RuneGlassPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		// Cancels in-flight polling without blocking; RuneLite owns the executor itself.
+		// Cancel in-flight work without blocking; RuneLite owns the executor itself.
 		pairingService.shutdown();
+		syncService.shutDown();
 
 		clientToolbar.removeNavigation(navButton);
 		navButton = null;
@@ -175,6 +185,15 @@ public class RuneGlassPlugin extends Plugin
 
 		identity = next;
 		log.debug("Account identity changed: {}", next);
+
+		if (next != null)
+		{
+			syncService.startSession(next);
+		}
+		else if (previous != null)
+		{
+			syncService.endSession();
+		}
 
 		final RuneGlassPanel p = panel;
 		if (p != null)
