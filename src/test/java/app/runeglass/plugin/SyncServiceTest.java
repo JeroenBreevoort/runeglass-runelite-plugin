@@ -5,7 +5,9 @@
  */
 package app.runeglass.plugin;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import static org.junit.Assert.assertEquals;
@@ -36,7 +38,7 @@ public class SyncServiceTest
 		config = new StubConfig();
 		client = new StubClient(config);
 		executor = Executors.newSingleThreadScheduledExecutor();
-		service = new SyncService(client, config, executor);
+		service = new SyncService(client, config, executor, new com.google.gson.Gson());
 	}
 
 	@After
@@ -216,6 +218,47 @@ public class SyncServiceTest
 		service.flushIfDue();
 
 		assertEquals("no request when there is nothing to say", callsAfterSessionStart, client.calls);
+	}
+
+	/**
+	 * Defence in depth for the bug the Convex compatibility check caught: no event type, present
+	 * or future, should be able to push a request past the backend's document limit.
+	 */
+	@Test
+	public void anOversizedBatchIsTrimmedToFitTheByteBudget()
+	{
+		service.startSession(ZEZIMA);
+
+		final List<RuneGlassApi.ItemStack> bulky = new ArrayList<>();
+		for (int i = 0; i < 2000; i++)
+		{
+			bulky.add(new RuneGlassApi.ItemStack(29_000 + i, 2_000_000_000, i));
+		}
+
+		for (int i = 0; i < 20; i++)
+		{
+			service.record(RuneGlassApi.Kind.CONTAINER, Collections.singletonMap("items", bulky));
+		}
+
+		final List<RuneGlassApi.Event> batch = service.trimToBudget(service.getQueue().peekBatch());
+
+		assertTrue("batch should have been trimmed", batch.size() < 21);
+		assertTrue("a trimmed batch must still carry something", batch.size() >= 1);
+
+		final int bytes = new com.google.gson.Gson().toJson(batch).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+		assertTrue("trimmed batch is still " + (bytes / 1024) + " KiB", bytes <= SyncService.MAX_EVENT_BYTES * 2);
+	}
+
+	@Test
+	public void trimmedEventsAreNotLostJustDeferred()
+	{
+		service.startSession(ZEZIMA);
+		service.record(RuneGlassApi.Kind.LEVEL_UP, Collections.singletonMap("skill", "SLAYER"));
+
+		final int queued = service.getQueue().size();
+		service.trimToBudget(service.getQueue().peekBatch());
+
+		assertEquals("trimming must not consume the queue", queued, service.getQueue().size());
 	}
 
 	@Test

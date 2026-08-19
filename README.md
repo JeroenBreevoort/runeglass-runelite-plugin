@@ -56,6 +56,10 @@ that stands in for the phone app claiming it.
 Unit tests cover the pairing state machine, the retryable/terminal error split, and the account
 hash string conversion.
 
+`ConvexCompatibilityTest` checks the wire format against Convex's documented limits — document
+size, array length, nesting depth, and the rules for field names (the snapshot uses skill, quest
+and diary names as keys). It runs without a backend and is what caught the bank sizing problem.
+
 `PairingIntegrationTest` drives the real HTTP client against the mock, so the Java DTOs and the
 mock's JSON field names are checked against each other rather than assumed to agree. It **skips
 itself** when the mock isn't running, so `./gradlew test` stays green either way — start the mock
@@ -84,11 +88,16 @@ is turned on.
 | Skills | `StatChanged` | Level ups only | Experience for all 23 skills |
 | Inventory | `ItemContainerChanged` | Never — far too noisy | Full contents |
 | Equipment | `ItemContainerChanged` | On change | Full contents |
-| Bank | `ItemContainerChanged` | On change | Last known |
+| Bank | `ItemContainerChanged` | Never — see below | Last known |
 | Loot | `NpcLootReceived`, `LootReceived` | Every drop, with session kill count | — |
 | Diaries | `VarbitChanged` | On completion | All 48 tiers |
 | Combat achievements | `VarbitChanged` | On tier change | All 6 tiers |
 | Quests | Polled per snapshot | On state transition | All quest states |
+
+The bank is snapshot-only for a concrete reason: a full bank serializes to roughly 80 KB, and a
+batch of a hundred such events is around 8 MiB — eight times Convex's 1 MiB document limit. A bank
+change instead brings the next snapshot forward, so the contents travel once. `SyncService` also
+enforces a byte budget per request, so no future event type can reintroduce the problem.
 
 **Not yet implemented: the collection log.** Its contents are spread across thousands of
 per-item varbits and are only fully readable while the log interface is open, so it needs its own

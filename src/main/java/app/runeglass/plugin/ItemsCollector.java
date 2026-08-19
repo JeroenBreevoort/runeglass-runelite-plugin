@@ -26,8 +26,11 @@ import net.runelite.client.eventbus.Subscribe;
  * our own immutable lists the moment the event arrives. Holding a reference and reading it later
  * from another thread would produce contents that silently change underneath us.
  * <p>
- * Inventory changes constantly — every item picked up, dropped, eaten or moved — so it rides on
- * snapshots only. Equipment and bank change rarely enough to be worth an event each.
+ * Inventory and bank ride on snapshots only. Inventory changes on every action a player takes,
+ * and the bank is simply too large to be an event — a full bank serializes to roughly 80 KB, so a
+ * batch of them would blow past the backend's per-document limit. Equipment is small and changes
+ * rarely, so it is worth an event. A bank change instead asks for an early snapshot, which
+ * carries the contents once rather than repeatedly.
  */
 @Singleton
 public class ItemsCollector
@@ -43,6 +46,9 @@ public class ItemsCollector
 	 */
 	private volatile List<RuneGlassApi.ItemStack> bank = Collections.emptyList();
 
+	/** Set when contents changed enough to be worth a snapshot sooner than the usual cadence. */
+	private volatile boolean snapshotRequested;
+
 	@Inject
 	ItemsCollector(RuneGlassConfig config, SyncService sync)
 	{
@@ -55,6 +61,20 @@ public class ItemsCollector
 		inventory = Collections.emptyList();
 		equipment = Collections.emptyList();
 		bank = Collections.emptyList();
+		snapshotRequested = false;
+	}
+
+	/**
+	 * Returns whether a snapshot was requested since the last call, clearing the flag.
+	 */
+	public boolean consumeSnapshotRequest()
+	{
+		if (!snapshotRequested)
+		{
+			return false;
+		}
+		snapshotRequested = false;
+		return true;
 	}
 
 	@Subscribe
@@ -83,12 +103,12 @@ public class ItemsCollector
 		{
 			equipment = items;
 			emitContainerEvent("WORN", items);
+			return;
 		}
-		else
-		{
-			bank = items;
-			emitContainerEvent("BANK", items);
-		}
+
+		// Bank contents are far too large to travel as an event; ask for a snapshot instead.
+		bank = items;
+		snapshotRequested = true;
 	}
 
 	private void emitContainerEvent(String container, List<RuneGlassApi.ItemStack> items)

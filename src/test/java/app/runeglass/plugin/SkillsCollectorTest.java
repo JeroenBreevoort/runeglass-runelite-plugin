@@ -141,7 +141,7 @@ public class SkillsCollectorTest
 
 		RecordingSync(RuneGlassConfig config)
 		{
-			super(null, config, null);
+			super(null, config, null, null);
 		}
 
 		@Override

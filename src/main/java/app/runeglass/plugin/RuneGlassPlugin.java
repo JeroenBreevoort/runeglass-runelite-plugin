@@ -185,7 +185,10 @@ public class RuneGlassPlugin extends Plugin
 			return;
 		}
 
-		if (--ticksUntilSnapshot > 0)
+		// A bank change carries too much to be an event, so it asks for a snapshot instead.
+		final boolean requested = itemsCollector.consumeSnapshotRequest();
+
+		if (--ticksUntilSnapshot > 0 && !requested)
 		{
 			return;
 		}

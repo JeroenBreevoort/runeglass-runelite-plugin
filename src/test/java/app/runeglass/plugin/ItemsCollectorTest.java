@@ -12,6 +12,7 @@ import net.runelite.api.Node;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.gameval.InventoryID;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import org.junit.Before;
 import org.junit.Test;
@@ -71,14 +72,35 @@ public class ItemsCollectorTest
 		assertEquals(1, collector.getEquipment().size());
 	}
 
+	/**
+	 * A full bank serializes to roughly 80 KB. As an event, a batch of them exceeds the backend's
+	 * per-document limit several times over, so the bank rides on snapshots instead.
+	 */
 	@Test
-	public void bankChangesEmitAnEvent()
+	public void bankChangesRequestASnapshotRatherThanEmittingAnEvent()
 	{
 		changed(InventoryID.BANK, new Item[]{new Item(995, 5_000_000)});
 
-		assertEquals(1, sync.events.size());
-		assertEquals("BANK", sync.events.get(0).data.get("container"));
+		assertTrue("the bank is too large to travel as an event", sync.events.isEmpty());
 		assertEquals(5_000_000, collector.getBank().get(0).qty);
+		assertTrue("a bank change should bring the next snapshot forward", collector.consumeSnapshotRequest());
+	}
+
+	@Test
+	public void theSnapshotRequestIsConsumedOnlyOnce()
+	{
+		changed(InventoryID.BANK, new Item[]{new Item(995, 1)});
+
+		assertTrue(collector.consumeSnapshotRequest());
+		assertFalse("the flag must not latch", collector.consumeSnapshotRequest());
+	}
+
+	@Test
+	public void equipmentChangesDoNotRequestASnapshot()
+	{
+		changed(InventoryID.WORN, new Item[]{new Item(11802, 1)});
+
+		assertFalse("equipment is already carried by its own event", collector.consumeSnapshotRequest());
 	}
 
 	@Test

@@ -5,6 +5,8 @@
  */
 package app.runeglass.plugin;
 
+import com.google.gson.Gson;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -36,9 +38,17 @@ public class SyncService
 	private static final long BACKOFF_BASE_MS = 10_000L;
 	private static final long BACKOFF_MAX_MS = 5 * 60_000L;
 
+	/**
+	 * Ceiling on the serialized events in one request. Convex caps a document at 1 MiB, and the
+	 * backend stores more than just what we send, so this leaves generous room. Without it, a
+	 * single verbose event type is enough to make every request fail permanently.
+	 */
+	static final int MAX_EVENT_BYTES = 256 * 1024;
+
 	private final RuneGlassClient client;
 	private final RuneGlassConfig config;
 	private final ScheduledExecutorService executor;
+	private final Gson gson;
 	private final EventQueue queue = new EventQueue();
 
 	/** Stops two ticks from having requests in flight at once. */
@@ -60,11 +70,12 @@ public class SyncService
 	private volatile Consumer<SyncStatus> listener;
 
 	@Inject
-	SyncService(RuneGlassClient client, RuneGlassConfig config, ScheduledExecutorService executor)
+	SyncService(RuneGlassClient client, RuneGlassConfig config, ScheduledExecutorService executor, Gson gson)
 	{
 		this.client = client;
 		this.config = config;
 		this.executor = executor;
+		this.gson = gson;
 	}
 
 	public void setListener(@Nullable Consumer<SyncStatus> listener)
@@ -178,7 +189,7 @@ public class SyncService
 		}
 
 		final RuneGlassApi.Snapshot snapshot = pendingSnapshot;
-		final List<RuneGlassApi.Event> events = queue.peekBatch();
+		final List<RuneGlassApi.Event> events = trimToBudget(queue.peekBatch());
 		if (events.isEmpty() && snapshot == null)
 		{
 			return;
@@ -248,6 +259,37 @@ public class SyncService
 				}
 			}
 		});
+	}
+
+	/**
+	 * Drops events from the end of a batch until it fits the size budget. The remainder goes out
+	 * on the next tick, so nothing is lost — the batch is just split.
+	 * <p>
+	 * A single event over budget is sent alone rather than silently discarded: the backend will
+	 * reject it as non-retryable, which drops it with a log line instead of stalling the queue.
+	 */
+	List<RuneGlassApi.Event> trimToBudget(List<RuneGlassApi.Event> events)
+	{
+		if (events.isEmpty() || gson == null)
+		{
+			return events;
+		}
+
+		int total = 0;
+		for (int i = 0; i < events.size(); i++)
+		{
+			total += gson.toJson(events.get(i)).getBytes(StandardCharsets.UTF_8).length;
+
+			if (total > MAX_EVENT_BYTES)
+			{
+				final int keep = Math.max(1, i);
+				log.debug("Trimming batch from {} to {} events to stay within {} bytes",
+					events.size(), keep, MAX_EVENT_BYTES);
+				return events.subList(0, keep);
+			}
+		}
+
+		return events;
 	}
 
 	private void handleFailure(ApiError error, long highestSeq)
