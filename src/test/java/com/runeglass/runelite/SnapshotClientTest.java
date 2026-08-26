@@ -5,6 +5,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.IOException;
+import java.math.BigInteger;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -23,6 +25,8 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.Rule;
+import org.junit.rules.TemporaryFolder;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -30,9 +34,8 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-public class PreviewSnapshotClientTest
+public class SnapshotClientTest
 {
-	private static final String PREVIEW_KEY = "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk";
 	private static final String RAW_CREDENTIAL = "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr";
 	private static final String CONNECTION_ID = "pcn_ccccccccccccccccccccccccccccccccccccccccccc";
 	private static final Instant CAPTURED_AT = Instant.parse("2026-08-24T14:00:01Z");
@@ -41,7 +44,12 @@ public class PreviewSnapshotClientTest
 
 	private MockWebServer server;
 	private ScheduledExecutorService executor;
-	private PreviewSnapshotClient client;
+	private SnapshotClient client;
+	private DurableSnapshotQueue queue;
+	private Path queueDirectory;
+
+	@Rule
+	public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
 	@Before
 	public void setUp() throws IOException
@@ -54,7 +62,12 @@ public class PreviewSnapshotClientTest
 			thread.setDaemon(true);
 			return thread;
 		});
-		client = client(server.url("/"), true, PREVIEW_KEY);
+		client = client(server.url("/"));
+		queueDirectory = temporaryFolder.newFolder("queue").toPath();
+		queue = new DurableSnapshotQueue(
+			queueDirectory,
+			new Gson(),
+			Clock.fixed(CAPTURED_AT, ZoneOffset.UTC));
 	}
 
 	@After
@@ -73,13 +86,12 @@ public class PreviewSnapshotClientTest
 	{
 		server.enqueue(accepted());
 		CountDownLatch accepted = new CountDownLatch(1);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		assertTrue(client.connect(credentials(), context(), listener(accepted, failure)));
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		assertTrue(connect(context(), listener(accepted, failure)));
 		assertTrue(client.publish(snapshot()));
 
 		RecordedRequest request = takeRequest();
 		assertEquals("Bearer " + RAW_CREDENTIAL, request.getHeader("Authorization"));
-		assertEquals(PREVIEW_KEY, request.getHeader("X-Runeglass-Preview-Key"));
 		assertEquals("application/json", request.getHeader("Accept"));
 		assertEquals("application/json; charset=utf-8", request.getHeader("Content-Type"));
 
@@ -106,7 +118,7 @@ public class PreviewSnapshotClientTest
 
 		JsonObject clientBody = body.getAsJsonObject("client");
 		assertExactKeys(clientBody, "pluginVersion", "runeliteVersion", "gameRevision");
-		assertEquals("0.1.0", clientBody.get("pluginVersion").getAsString());
+		assertEquals("1.0.0", clientBody.get("pluginVersion").getAsString());
 		assertEquals("1.12.36", clientBody.get("runeliteVersion").getAsString());
 		assertEquals(231, clientBody.get("gameRevision").getAsInt());
 
@@ -146,8 +158,8 @@ public class PreviewSnapshotClientTest
 		server.enqueue(accepted());
 		CountDownLatch accepted = new CountDownLatch(1);
 		CountDownLatch retryScheduled = new CountDownLatch(1);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		client.connect(credentials(), context(), new PreviewSnapshotClient.Listener()
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		connect(context(), new SnapshotClient.Listener()
 		{
 			@Override
 			public void onUploading(int recordCount)
@@ -167,7 +179,7 @@ public class PreviewSnapshotClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewSnapshotClient.Failure nextFailure)
+			public void onFailure(SnapshotClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 			}
@@ -190,8 +202,8 @@ public class PreviewSnapshotClientTest
 			.setHeader("Content-Type", "application/json")
 			.setBody("{\"protocolVersion\":1,\"error\":\"binding_mismatch\"}"));
 		CountDownLatch failed = new CountDownLatch(1);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		client.connect(credentials(), context(), new PreviewSnapshotClient.Listener()
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		connect(context(), new SnapshotClient.Listener()
 		{
 			@Override
 			public void onUploading(int recordCount)
@@ -209,7 +221,7 @@ public class PreviewSnapshotClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewSnapshotClient.Failure nextFailure)
+			public void onFailure(SnapshotClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 				failed.countDown();
@@ -219,7 +231,7 @@ public class PreviewSnapshotClientTest
 
 		assertNotNull(takeRequest());
 		assertTrue(failed.await(2, TimeUnit.SECONDS));
-		assertEquals(PreviewSnapshotClient.Failure.BINDING_MISMATCH, failure.get());
+		assertEquals(SnapshotClient.Failure.BINDING_MISMATCH, failure.get());
 		assertFalse(client.publish(snapshot()));
 		assertEquals(1, server.getRequestCount());
 	}
@@ -232,13 +244,13 @@ public class PreviewSnapshotClientTest
 			.setHeader("Content-Type", "application/json")
 			.setBody("{\"protocolVersion\":1,\"error\":\"invalid_connection_credential\"}"));
 		CountDownLatch failed = new CountDownLatch(1);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		assertTrue(client.connect(credentials(), context(), failureListener(failed, failure)));
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		assertTrue(connect(context(), failureListener(failed, failure)));
 		assertTrue(client.publish(snapshot()));
 
 		assertNotNull(takeRequest());
 		assertTrue(failed.await(2, TimeUnit.SECONDS));
-		assertEquals(PreviewSnapshotClient.Failure.INVALID_CONNECTION, failure.get());
+		assertEquals(SnapshotClient.Failure.INVALID_CONNECTION, failure.get());
 		assertFalse(client.publish(snapshot()));
 		assertNull(server.takeRequest(500, TimeUnit.MILLISECONDS));
 	}
@@ -251,16 +263,87 @@ public class PreviewSnapshotClientTest
 			.setHeader("Content-Type", "application/json")
 			.setBody("{\"protocolVersion\":1,\"error\":\"sequence_conflict\"}"));
 		CountDownLatch failed = new CountDownLatch(1);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		assertTrue(client.connect(credentials(), context(), failureListener(failed, failure)));
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		assertTrue(connect(context(), failureListener(failed, failure)));
 		assertTrue(client.publish(snapshot()));
 
 		RecordedRequest rejected = takeRequest();
 		assertSequenceAndReason(rejected, "1", "login_baseline");
 		assertTrue(failed.await(2, TimeUnit.SECONDS));
-		assertEquals(PreviewSnapshotClient.Failure.REJECTED_BATCH, failure.get());
+		assertEquals(SnapshotClient.Failure.REJECTED_BATCH, failure.get());
+		assertEquals(0, queue.size());
 		assertFalse(client.publish(snapshot()));
 		assertNull(server.takeRequest(500, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
+	public void replaysAnExactOfflineBatchAfterRestartThenUsesTheNextSequence() throws Exception
+	{
+		server.enqueue(new MockResponse()
+			.setResponseCode(503)
+			.setHeader("Content-Type", "application/json")
+			.setHeader("Retry-After", "300")
+			.setBody("{\"protocolVersion\":1,\"error\":\"temporarily_unavailable\"}"));
+		CountDownLatch retryScheduled = new CountDownLatch(1);
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		assertTrue(connect(context(), new SnapshotClient.Listener()
+		{
+			@Override
+			public void onUploading(int recordCount)
+			{
+			}
+
+			@Override
+			public void onAccepted(Instant serverTime)
+			{
+			}
+
+			@Override
+			public void onRetryScheduled()
+			{
+				retryScheduled.countDown();
+			}
+
+			@Override
+			public void onFailure(SnapshotClient.Failure nextFailure)
+			{
+				failure.set(nextFailure);
+			}
+		}));
+		assertTrue(client.publish(snapshot()));
+		RecordedRequest firstAttempt = takeRequest();
+		String persistedBody = firstAttempt.getBody().clone().readUtf8();
+		assertTrue(retryScheduled.await(2, TimeUnit.SECONDS));
+		assertEquals(1, queue.size());
+
+		client.cancel();
+		client = client(server.url("/"));
+		queue = new DurableSnapshotQueue(
+			queueDirectory,
+			new Gson(),
+			Clock.fixed(CAPTURED_AT, ZoneOffset.UTC));
+		server.enqueue(accepted("1"));
+		server.enqueue(accepted("2"));
+		CountDownLatch accepted = new CountDownLatch(2);
+		String nextSessionId = "eec7d765-0f2f-4f5d-840a-403835e63a0f";
+		assertTrue(client.connect(
+			credentials(),
+			context(nextSessionId),
+			BigInteger.valueOf(2),
+			queue,
+			listener(accepted, failure)));
+
+		RecordedRequest replay = takeRequest();
+		assertEquals(persistedBody, replay.getBody().clone().readUtf8());
+		assertTrue(client.publishImmediately(snapshot(SnapshotReason.MANUAL_SYNC)));
+		RecordedRequest next = takeRequest();
+		JsonObject nextBody = new JsonParser().parse(
+			next.getBody().clone().readUtf8()).getAsJsonObject();
+		assertEquals("2", nextBody.get("sequence").getAsString());
+		assertEquals(nextSessionId, nextBody.get("sessionId").getAsString());
+		assertTrue(accepted.await(2, TimeUnit.SECONDS));
+		assertEquals(0, queue.size());
+		assertNull(failure.get());
 	}
 
 	@Test
@@ -274,8 +357,8 @@ public class PreviewSnapshotClientTest
 		CountDownLatch thirdAccepted = new CountDownLatch(1);
 		CountDownLatch drained = new CountDownLatch(1);
 		AtomicInteger acceptedCount = new AtomicInteger();
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		PreviewSnapshotClient.Listener listener = new PreviewSnapshotClient.Listener()
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		SnapshotClient.Listener listener = new SnapshotClient.Listener()
 		{
 			@Override
 			public void onUploading(int recordCount)
@@ -306,7 +389,7 @@ public class PreviewSnapshotClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewSnapshotClient.Failure nextFailure)
+			public void onFailure(SnapshotClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 			}
@@ -318,7 +401,7 @@ public class PreviewSnapshotClientTest
 			}
 		};
 
-		assertTrue(client.connect(credentials(), context(SESSION_ID), listener));
+		assertTrue(connect(context(SESSION_ID), listener));
 		assertTrue(client.publish(snapshot(SnapshotReason.LOGIN_BASELINE)));
 		assertSequenceAndReason(takeRequest(), "1", "login_baseline");
 		assertTrue(firstAccepted.await(2, TimeUnit.SECONDS));
@@ -328,8 +411,7 @@ public class PreviewSnapshotClientTest
 		assertTrue(secondAccepted.await(2, TimeUnit.SECONDS));
 		assertTrue(drained.await(2, TimeUnit.SECONDS));
 
-		assertTrue(client.connect(
-			credentials(),
+		assertTrue(connect(
 			context("eec7d765-0f2f-4f5d-840a-403835e63a0f"),
 			listener));
 		assertTrue(client.publish(snapshot(SnapshotReason.LOGIN_BASELINE)));
@@ -343,8 +425,8 @@ public class PreviewSnapshotClientTest
 	{
 		CountDownLatch firstAccepted = new CountDownLatch(1);
 		CountDownLatch firstDrained = new CountDownLatch(1);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		PreviewSnapshotClient.Listener firstListener = new PreviewSnapshotClient.Listener()
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		SnapshotClient.Listener firstListener = new SnapshotClient.Listener()
 		{
 			@Override
 			public void onUploading(int recordCount)
@@ -363,7 +445,7 @@ public class PreviewSnapshotClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewSnapshotClient.Failure nextFailure)
+			public void onFailure(SnapshotClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 			}
@@ -375,14 +457,13 @@ public class PreviewSnapshotClientTest
 			}
 		};
 
-		assertTrue(client.connect(credentials(), context(SESSION_ID), firstListener));
+		assertTrue(connect(context(SESSION_ID), firstListener));
 		assertTrue(client.publish(snapshot(SnapshotReason.LOGIN_BASELINE)));
 		RecordedRequest first = takeRequest();
 		assertSequenceAndReason(first, "1", "login_baseline");
 
 		assertTrue(client.finishSession());
-		assertFalse(client.connect(
-			credentials(),
+		assertFalse(connect(
 			context("eec7d765-0f2f-4f5d-840a-403835e63a0f"),
 			firstListener));
 
@@ -392,8 +473,7 @@ public class PreviewSnapshotClientTest
 
 		CountDownLatch secondAccepted = new CountDownLatch(1);
 		String secondSessionId = "eec7d765-0f2f-4f5d-840a-403835e63a0f";
-		assertTrue(client.connect(
-			credentials(),
+		assertTrue(connect(
 			context(secondSessionId),
 			listener(secondAccepted, failure)));
 		server.enqueue(accepted("2"));
@@ -413,8 +493,8 @@ public class PreviewSnapshotClientTest
 		server.enqueue(accepted("1"));
 		server.enqueue(accepted("2"));
 		CountDownLatch accepted = new CountDownLatch(2);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		assertTrue(client.connect(credentials(), context(), listener(accepted, failure)));
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		assertTrue(connect(context(), listener(accepted, failure)));
 
 		assertTrue(client.publish(snapshot(SnapshotReason.LOGIN_BASELINE)));
 		assertSequenceAndReason(takeRequest(), "1", "login_baseline");
@@ -433,9 +513,8 @@ public class PreviewSnapshotClientTest
 			.setHeader("Content-Type", "application/json")
 			.setHeader("Retry-After", "1")
 			.setBody("{\"protocolVersion\":1,\"error\":\"temporarily_unavailable\"}"));
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		assertTrue(client.connect(
-			credentials(),
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		assertTrue(connect(
 			context(),
 			listener(new CountDownLatch(1), failure)));
 
@@ -447,52 +526,43 @@ public class PreviewSnapshotClientTest
 		assertNull(failure.get());
 	}
 
-	@Test
-	public void disabledPreviewFailsClosedWithoutNetworkRequest()
+	private SnapshotClient client(HttpUrl baseUrl)
 	{
-		client.cancel();
-		client = client(server.url("/"), false, PREVIEW_KEY);
-		AtomicReference<PreviewSnapshotClient.Failure> failure = new AtomicReference<>();
-		assertFalse(client.connect(
-			credentials(),
-			context(),
-			listener(new CountDownLatch(1), failure)));
-		assertEquals(PreviewSnapshotClient.Failure.CONFIGURATION_MISSING, failure.get());
-		assertEquals(0, server.getRequestCount());
-	}
-
-	private PreviewSnapshotClient client(HttpUrl baseUrl, boolean enabled, String previewKey)
-	{
-		return new PreviewSnapshotClient(
+		return new SnapshotClient(
 			new OkHttpClient(),
 			new Gson(),
 			executor,
 			baseUrl,
-			previewKey,
-			enabled,
 			Clock.fixed(CAPTURED_AT, ZoneOffset.UTC),
 			1,
 			() -> 0L);
 	}
 
-	private static PreviewPairingClient.Credentials credentials()
+	private boolean connect(
+		SyncContext context,
+		SnapshotClient.Listener listener)
 	{
-		return new PreviewPairingClient.Credentials(CONNECTION_ID, RAW_CREDENTIAL);
+		return client.connect(credentials(), context, BigInteger.ONE, queue, listener);
 	}
 
-	private static PreviewSyncContext context()
+	private static PairingClient.Credentials credentials()
+	{
+		return new PairingClient.Credentials(CONNECTION_ID, RAW_CREDENTIAL);
+	}
+
+	private static SyncContext context()
 	{
 		return context(SESSION_ID);
 	}
 
-	private static PreviewSyncContext context(String sessionId)
+	private static SyncContext context(String sessionId)
 	{
-		return new PreviewSyncContext(
+		return new SyncContext(
 			sessionId,
 			"Iron Jeromey",
 			"ironman",
 			"standard",
-			"0.1.0",
+			"1.0.0",
 			"1.12.36",
 			231);
 	}
@@ -524,11 +594,11 @@ public class PreviewSnapshotClientTest
 			boostedLevels);
 	}
 
-	private static PreviewSnapshotClient.Listener listener(
+	private static SnapshotClient.Listener listener(
 		CountDownLatch accepted,
-		AtomicReference<PreviewSnapshotClient.Failure> failure)
+		AtomicReference<SnapshotClient.Failure> failure)
 	{
-		return new PreviewSnapshotClient.Listener()
+		return new SnapshotClient.Listener()
 		{
 			@Override
 			public void onUploading(int recordCount)
@@ -547,18 +617,18 @@ public class PreviewSnapshotClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewSnapshotClient.Failure nextFailure)
+			public void onFailure(SnapshotClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 			}
 		};
 	}
 
-	private static PreviewSnapshotClient.Listener failureListener(
+	private static SnapshotClient.Listener failureListener(
 		CountDownLatch failed,
-		AtomicReference<PreviewSnapshotClient.Failure> failure)
+		AtomicReference<SnapshotClient.Failure> failure)
 	{
-		return new PreviewSnapshotClient.Listener()
+		return new SnapshotClient.Listener()
 		{
 			@Override
 			public void onUploading(int recordCount)
@@ -578,7 +648,7 @@ public class PreviewSnapshotClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewSnapshotClient.Failure nextFailure)
+			public void onFailure(SnapshotClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 				failed.countDown();
@@ -627,6 +697,6 @@ public class PreviewSnapshotClientTest
 
 	private static void assertExactKeys(JsonObject body, String... expected)
 	{
-		assertTrue(PreviewProtocolJson.hasExactKeys(body, expected));
+		assertTrue(ProtocolJson.hasExactKeys(body, expected));
 	}
 }

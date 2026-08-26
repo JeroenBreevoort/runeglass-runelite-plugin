@@ -2,6 +2,7 @@ package com.runeglass.runelite;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.time.Clock;
@@ -12,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -25,7 +27,7 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
-final class PreviewSnapshotClient
+final class SnapshotClient
 {
 	private static final String BATCH_PATH = "runelite/v1/batches";
 	private static final int MAX_PENDING_SNAPSHOTS = 8;
@@ -44,6 +46,10 @@ final class PreviewSnapshotClient
 
 		void onFailure(Failure failure);
 
+		default void onNextSequenceChanged(BigInteger nextSequence)
+		{
+		}
+
 		default void onSessionDrained()
 		{
 		}
@@ -51,7 +57,6 @@ final class PreviewSnapshotClient
 
 	enum Failure
 	{
-		CONFIGURATION_MISSING,
 		INVALID_CONNECTION,
 		BINDING_MISMATCH,
 		UNSUPPORTED_PROFILE,
@@ -64,18 +69,17 @@ final class PreviewSnapshotClient
 	private final Gson gson;
 	private final ScheduledExecutorService executor;
 	private final HttpUrl baseUrl;
-	private final String previewKey;
-	private final boolean enabled;
 	private final Clock clock;
 	private final int baseRetrySeconds;
 	private final LongSupplier retryJitterMillis;
 	private final Deque<SkillsSnapshot> pending = new ArrayDeque<>();
 
 	private long generation;
-	private PreviewPairingClient.Credentials credentials;
-	private PreviewSyncContext context;
+	private PairingClient.Credentials credentials;
+	private SyncContext context;
 	private Listener listener;
 	private BigInteger nextSequence = BigInteger.ONE;
+	private DurableSnapshotQueue durableQueue;
 	private Instant nextUploadAt = Instant.EPOCH;
 	private InFlightBatch inFlight;
 	private Call activeCall;
@@ -85,32 +89,28 @@ final class PreviewSnapshotClient
 	private boolean closingAfterFlush;
 	private boolean forceNextDispatch;
 
-	static PreviewSnapshotClient fromEnvironment(
+	static SnapshotClient create(
 		OkHttpClient httpClient,
 		Gson gson,
 		ScheduledExecutorService executor)
 	{
-		return new PreviewSnapshotClient(
+		return new SnapshotClient(
 			httpClient,
 			gson,
 			executor,
 			Objects.requireNonNull(
-				HttpUrl.parse(PreviewPairingClient.PREVIEW_BASE_URL),
-				"preview base URL"),
-			System.getenv(PreviewPairingClient.PREVIEW_KEY_ENV),
-			"true".equals(System.getenv(PreviewPairingClient.PREVIEW_ENABLED_ENV)),
+				HttpUrl.parse(PairingClient.BASE_URL),
+				"RuneGlass base URL"),
 			Clock.systemUTC(),
 			5,
 			() -> java.util.concurrent.ThreadLocalRandom.current().nextLong(1_001));
 	}
 
-	PreviewSnapshotClient(
+	SnapshotClient(
 		OkHttpClient httpClient,
 		Gson gson,
 		ScheduledExecutorService executor,
 		HttpUrl baseUrl,
-		String previewKey,
-		boolean enabled,
 		Clock clock,
 		int baseRetrySeconds,
 		LongSupplier retryJitterMillis)
@@ -119,8 +119,6 @@ final class PreviewSnapshotClient
 		this.gson = Objects.requireNonNull(gson, "gson");
 		this.executor = Objects.requireNonNull(executor, "executor");
 		this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl");
-		this.previewKey = previewKey;
-		this.enabled = enabled;
 		this.clock = Objects.requireNonNull(clock, "clock");
 		if (baseRetrySeconds <= 0 || baseRetrySeconds > MAX_RETRY_AFTER_SECONDS)
 		{
@@ -130,46 +128,47 @@ final class PreviewSnapshotClient
 		this.retryJitterMillis = Objects.requireNonNull(retryJitterMillis, "retryJitterMillis");
 	}
 
-	boolean isAvailable()
-	{
-		return enabled && previewKey != null && previewKey.length() >= 32;
-	}
-
 	boolean connect(
-		PreviewPairingClient.Credentials nextCredentials,
-		PreviewSyncContext nextContext,
+		PairingClient.Credentials nextCredentials,
+		SyncContext nextContext,
+		BigInteger persistedNextSequence,
+		DurableSnapshotQueue nextDurableQueue,
 		Listener nextListener)
 	{
 		Objects.requireNonNull(nextCredentials, "credentials");
 		Objects.requireNonNull(nextContext, "context");
+		Objects.requireNonNull(persistedNextSequence, "persistedNextSequence");
+		Objects.requireNonNull(nextDurableQueue, "durableQueue");
 		Objects.requireNonNull(nextListener, "listener");
-		if (!isAvailable())
+		if (persistedNextSequence.signum() <= 0
+			|| persistedNextSequence.toString().length() > 20
+			|| nextDurableQueue.getLoadStatus() != DurableSnapshotQueue.LoadStatus.READY)
 		{
-			cancel();
-			nextListener.onFailure(Failure.CONFIGURATION_MISSING);
+			nextListener.onFailure(Failure.REJECTED_BATCH);
 			return false;
 		}
-
 		synchronized (lock)
 		{
 			if (finalizingSession || activeCall != null || scheduledDispatch != null)
 			{
 				return false;
 			}
-			boolean sameConnection = credentials != null
-				&& credentials.sameConnection(nextCredentials);
 			generation++;
 			resetSessionLocked();
-			if (!sameConnection)
-			{
-				nextSequence = BigInteger.ONE;
-			}
 			credentials = nextCredentials;
 			context = nextContext;
 			listener = nextListener;
+			durableQueue = nextDurableQueue;
+			nextSequence = nextSequence.max(persistedNextSequence);
 			nextUploadAt = Instant.EPOCH;
 			closingAfterFlush = false;
 		}
+		if (!validateRestoredQueue())
+		{
+			failCurrent(Failure.REJECTED_BATCH);
+			return false;
+		}
+		dispatchAsync();
 		return true;
 	}
 
@@ -204,7 +203,7 @@ final class PreviewSnapshotClient
 				cancelScheduledDispatchLocked();
 			}
 		}
-		dispatch();
+		dispatchAsync();
 		return true;
 	}
 
@@ -243,7 +242,7 @@ final class PreviewSnapshotClient
 		}
 		else
 		{
-			dispatch();
+			dispatchAsync();
 		}
 		return true;
 	}
@@ -266,7 +265,7 @@ final class PreviewSnapshotClient
 		}
 		if (!alreadyDrained)
 		{
-			dispatch();
+			dispatchAsync();
 		}
 	}
 
@@ -287,12 +286,54 @@ final class PreviewSnapshotClient
 		}
 	}
 
+	void discard()
+	{
+		final DurableSnapshotQueue queue;
+		synchronized (lock)
+		{
+			queue = durableQueue;
+			generation++;
+			resetLocked();
+		}
+		if (queue != null)
+		{
+			try
+			{
+				executor.execute(() ->
+				{
+					try
+					{
+						queue.clear();
+					}
+					catch (IOException ignored)
+					{
+					}
+				});
+			}
+			catch (RuntimeException ignored)
+			{
+			}
+		}
+	}
+
 	private void dispatch()
 	{
+		final SequenceAdvance sequenceAdvance = persistPending();
+		if (sequenceAdvance.listener != null)
+		{
+			sequenceAdvance.listener.onNextSequenceChanged(sequenceAdvance.nextSequence);
+		}
+		if (sequenceAdvance.failure != null)
+		{
+			fail(sequenceAdvance.generation, sequenceAdvance.failure);
+			return;
+		}
+
 		final long requestGeneration;
 		final Call call;
 		final Listener currentListener;
 		final int recordCount;
+		final Listener drainedListener;
 		Failure preparationFailure = null;
 
 		synchronized (lock)
@@ -300,18 +341,19 @@ final class PreviewSnapshotClient
 			if (credentials == null
 				|| context == null
 				|| listener == null
+				|| durableQueue == null
 				|| activeCall != null
 				|| scheduledDispatch != null)
 			{
 				return;
 			}
 
-			if (forceNextDispatch && inFlight == null && !pending.isEmpty())
+			if (forceNextDispatch && inFlight == null && durableQueue.size() > 0)
 			{
 				nextUploadAt = Instant.EPOCH;
 			}
 			long cooldownMillis = nextUploadAt.toEpochMilli() - clock.millis();
-			if (inFlight == null && cooldownMillis > 0 && !pending.isEmpty())
+			if (inFlight == null && cooldownMillis > 0 && durableQueue.size() > 0)
 			{
 				if (scheduleLocked(generation, cooldownMillis))
 				{
@@ -322,44 +364,53 @@ final class PreviewSnapshotClient
 
 			if (preparationFailure == null && inFlight == null)
 			{
-				if (pending.isEmpty())
+				Optional<DurableSnapshotQueue.Entry> queued = durableQueue.peek();
+				if (!queued.isPresent())
 				{
-					return;
+					drainedListener = drainSessionIfIdleLocked();
+					requestGeneration = generation;
+					call = null;
+					currentListener = listener;
+					recordCount = 0;
 				}
-				List<SkillsSnapshot> records = new ArrayList<>(MAX_PENDING_SNAPSHOTS);
-				while (!pending.isEmpty() && records.size() < MAX_PENDING_SNAPSHOTS)
+				else
 				{
-					records.add(pending.removeFirst());
-				}
-				forceNextDispatch = false;
-				try
-				{
-					PreviewSyncBatch batch = new PreviewSyncBatch(
-						java.util.UUID.randomUUID().toString(),
-						credentials.getConnectionId(),
-						nextSequence.toString(),
-						clock.instant(),
-						context,
-						records);
-					inFlight = new InFlightBatch(
-						nextSequence.toString(),
-						gson.toJson(batch),
-						records.size());
-				}
-				catch (RuntimeException exception)
-				{
-					preparationFailure = Failure.PROTOCOL_ERROR;
+					try
+					{
+						inFlight = queuedBatch(queued.get(), credentials.getConnectionId());
+					}
+					catch (RuntimeException exception)
+					{
+						preparationFailure = Failure.PROTOCOL_ERROR;
+					}
+					drainedListener = null;
+					requestGeneration = generation;
+					if (preparationFailure == null)
+					{
+						forceNextDispatch = false;
+						Request request = request(inFlight.body, credentials.getRawCredential());
+						call = httpClient.newCall(request);
+						activeCall = call;
+						currentListener = listener;
+						recordCount = inFlight.recordCount;
+					}
+					else
+					{
+						call = null;
+						currentListener = listener;
+						recordCount = 0;
+					}
 				}
 			}
-
-			if (preparationFailure != null)
+			else if (preparationFailure != null)
 			{
 				requestGeneration = generation;
 				call = null;
 				currentListener = listener;
 				recordCount = 0;
+				drainedListener = null;
 			}
-			else
+			else if (inFlight != null)
 			{
 				requestGeneration = generation;
 				Request request = request(inFlight.body, credentials.getRawCredential());
@@ -367,12 +418,31 @@ final class PreviewSnapshotClient
 				activeCall = call;
 				currentListener = listener;
 				recordCount = inFlight.recordCount;
+				drainedListener = null;
 			}
+			else
+			{
+				requestGeneration = generation;
+				call = null;
+				currentListener = listener;
+				recordCount = 0;
+				drainedListener = null;
+			}
+		}
+
+		if (drainedListener != null)
+		{
+			drainedListener.onSessionDrained();
+			return;
 		}
 
 		if (preparationFailure != null)
 		{
 			fail(requestGeneration, preparationFailure);
+			return;
+		}
+		if (call == null)
+		{
 			return;
 		}
 
@@ -408,6 +478,63 @@ final class PreviewSnapshotClient
 		currentListener.onUploading(recordCount);
 	}
 
+	private SequenceAdvance persistPending()
+	{
+		synchronized (lock)
+		{
+			if (credentials == null || context == null || listener == null || durableQueue == null)
+			{
+				return SequenceAdvance.none(generation);
+			}
+			BigInteger advancedTo = null;
+			try
+			{
+				while (!pending.isEmpty())
+				{
+					List<SkillsSnapshot> records = new ArrayList<>(MAX_PENDING_SNAPSHOTS);
+					for (SkillsSnapshot snapshot : pending)
+					{
+						if (records.size() == MAX_PENDING_SNAPSHOTS)
+						{
+							break;
+						}
+						records.add(snapshot);
+					}
+					String batchId = java.util.UUID.randomUUID().toString();
+					SyncBatch batch = new SyncBatch(
+						batchId,
+						credentials.getConnectionId(),
+						nextSequence.toString(),
+						clock.instant(),
+						context,
+						records);
+					DurableSnapshotQueue.EnqueueResult result = durableQueue.enqueue(
+						batchId,
+						gson.toJson(batch));
+					if (!result.wasAdded()
+						|| result.getExpiredDropped() != 0
+						|| result.getCapacityDropped() != 0)
+					{
+						throw new IOException("RuneGlass queue rejected a new batch");
+					}
+					for (int index = 0; index < records.size(); index++)
+					{
+						pending.removeFirst();
+					}
+					nextSequence = nextSequence.add(BigInteger.ONE);
+					advancedTo = nextSequence;
+				}
+			}
+			catch (IOException | RuntimeException exception)
+			{
+				return SequenceAdvance.failure(generation, Failure.PROTOCOL_ERROR);
+			}
+			return advancedTo == null
+				? SequenceAdvance.none(generation)
+				: SequenceAdvance.advanced(generation, listener, advancedTo);
+		}
+	}
+
 	private void handleResponse(long requestGeneration, Response response) throws IOException
 	{
 		if (response.code() == 200)
@@ -421,14 +548,14 @@ final class PreviewSnapshotClient
 			return;
 		}
 
-		JsonObject body = PreviewProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
-		if (!PreviewProtocolJson.hasExactKeys(body, "protocolVersion", "error")
-			|| PreviewProtocolJson.intValue(body, "protocolVersion") != 1)
+		JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+		if (!ProtocolJson.hasExactKeys(body, "protocolVersion", "error")
+			|| ProtocolJson.intValue(body, "protocolVersion") != 1)
 		{
 			fail(requestGeneration, Failure.PROTOCOL_ERROR);
 			return;
 		}
-		String error = PreviewProtocolJson.stringValue(body, "error");
+		String error = ProtocolJson.stringValue(body, "error");
 		if (response.code() == 401 && "invalid_connection_credential".equals(error))
 		{
 			fail(requestGeneration, Failure.INVALID_CONNECTION);
@@ -457,28 +584,28 @@ final class PreviewSnapshotClient
 
 	private void handleAccepted(long requestGeneration, Response response) throws IOException
 	{
-		JsonObject body = PreviewProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
-		if (!PreviewProtocolJson.hasExactKeys(
+		JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+		if (!ProtocolJson.hasExactKeys(
 			body,
 			"protocolVersion",
 			"status",
 			"acceptedSequence",
 			"serverTime",
 			"nextUploadAfterSeconds")
-			|| PreviewProtocolJson.intValue(body, "protocolVersion") != 1)
+			|| ProtocolJson.intValue(body, "protocolVersion") != 1)
 		{
 			fail(requestGeneration, Failure.PROTOCOL_ERROR);
 			return;
 		}
-		String status = PreviewProtocolJson.stringValue(body, "status");
-		String acceptedSequence = PreviewProtocolJson.stringValue(body, "acceptedSequence");
-		int nextUploadAfterSeconds = PreviewProtocolJson.intValue(
+		String status = ProtocolJson.stringValue(body, "status");
+		String acceptedSequence = ProtocolJson.stringValue(body, "acceptedSequence");
+		int nextUploadAfterSeconds = ProtocolJson.intValue(
 			body,
 			"nextUploadAfterSeconds");
 		final Instant serverTime;
 		try
 		{
-			serverTime = Instant.parse(PreviewProtocolJson.stringValue(body, "serverTime"));
+			serverTime = Instant.parse(ProtocolJson.stringValue(body, "serverTime"));
 		}
 		catch (DateTimeParseException exception)
 		{
@@ -504,9 +631,15 @@ final class PreviewSnapshotClient
 			}
 			else
 			{
+				if (durableQueue == null)
+				{
+					currentListener = null;
+					drainedListener = null;
+					return;
+				}
+				durableQueue.acknowledge(inFlight.batchId);
 				activeCall = null;
 				inFlight = null;
-				nextSequence = nextSequence.add(BigInteger.ONE);
 				nextUploadAt = clock.instant().plusSeconds(nextUploadAfterSeconds);
 				if (finalizingSession)
 				{
@@ -537,6 +670,7 @@ final class PreviewSnapshotClient
 	{
 		final Listener currentListener;
 		final boolean scheduled;
+		final boolean closed;
 		synchronized (lock)
 		{
 			if (requestGeneration != generation || inFlight == null)
@@ -546,23 +680,37 @@ final class PreviewSnapshotClient
 			activeCall = null;
 			if (closingAfterFlush)
 			{
+				currentListener = listener;
 				generation++;
 				resetLocked();
-				return;
+				scheduled = true;
+				closed = true;
 			}
-			retryAttempt++;
-			int exponent = Math.min(retryAttempt - 1, 6);
-			int backoffSeconds = Math.min(
-				MAX_RETRY_AFTER_SECONDS,
-				baseRetrySeconds * (1 << exponent));
-			int delaySeconds = serverDelaySeconds == null
-				? backoffSeconds
-				: Math.max(backoffSeconds, serverDelaySeconds);
-			long jitterMillis = Math.max(0L, Math.min(1_000L, retryJitterMillis.getAsLong()));
-			scheduled = scheduleLocked(
-				requestGeneration,
-				TimeUnit.SECONDS.toMillis(delaySeconds) + jitterMillis);
-			currentListener = listener;
+			else
+			{
+				retryAttempt++;
+				int exponent = Math.min(retryAttempt - 1, 6);
+				int backoffSeconds = Math.min(
+					MAX_RETRY_AFTER_SECONDS,
+					baseRetrySeconds * (1 << exponent));
+				int delaySeconds = serverDelaySeconds == null
+					? backoffSeconds
+					: Math.max(backoffSeconds, serverDelaySeconds);
+				long jitterMillis = Math.max(0L, Math.min(1_000L, retryJitterMillis.getAsLong()));
+				scheduled = scheduleLocked(
+					requestGeneration,
+					TimeUnit.SECONDS.toMillis(delaySeconds) + jitterMillis);
+				currentListener = listener;
+				closed = false;
+			}
+		}
+		if (closed)
+		{
+			if (currentListener != null)
+			{
+				currentListener.onSessionDrained();
+			}
+			return;
 		}
 		if (!scheduled)
 		{
@@ -599,6 +747,7 @@ final class PreviewSnapshotClient
 	private void fail(long requestGeneration, Failure failure)
 	{
 		final Listener currentListener;
+		final DurableSnapshotQueue queue;
 		synchronized (lock)
 		{
 			if (requestGeneration != generation)
@@ -606,8 +755,19 @@ final class PreviewSnapshotClient
 				return;
 			}
 			currentListener = listener;
+			queue = durableQueue;
 			generation++;
 			resetLocked();
+		}
+		if (queue != null)
+		{
+			try
+			{
+				queue.clear();
+			}
+			catch (IOException ignored)
+			{
+			}
 		}
 		if (currentListener != null)
 		{
@@ -628,6 +788,7 @@ final class PreviewSnapshotClient
 		context = null;
 		listener = null;
 		inFlight = null;
+		durableQueue = null;
 		nextSequence = BigInteger.ONE;
 		nextUploadAt = Instant.EPOCH;
 		retryAttempt = 0;
@@ -652,10 +813,6 @@ final class PreviewSnapshotClient
 
 	private void enqueueSnapshotLocked(SkillsSnapshot snapshot)
 	{
-		while (pending.size() >= MAX_PENDING_SNAPSHOTS)
-		{
-			pending.removeFirst();
-		}
 		pending.addLast(snapshot);
 	}
 
@@ -670,7 +827,11 @@ final class PreviewSnapshotClient
 
 	private Listener drainSessionIfIdleLocked()
 	{
-		if (!finalizingSession || activeCall != null || inFlight != null || !pending.isEmpty())
+		if (!finalizingSession
+			|| activeCall != null
+			|| inFlight != null
+			|| !pending.isEmpty()
+			|| (durableQueue != null && durableQueue.size() > 0))
 		{
 			return null;
 		}
@@ -689,11 +850,10 @@ final class PreviewSnapshotClient
 
 	private Request request(String body, String rawCredential)
 	{
-		HttpUrl url = Objects.requireNonNull(baseUrl.resolve(BATCH_PATH), "preview batch route");
+		HttpUrl url = Objects.requireNonNull(baseUrl.resolve(BATCH_PATH), "RuneGlass batch route");
 		return new Request.Builder()
 			.url(url)
 			.header("Accept", "application/json")
-			.header("X-Runeglass-Preview-Key", previewKey)
 			.header("Authorization", "Bearer " + rawCredential)
 			.post(RequestBody.create(JSON, body))
 			.build();
@@ -717,14 +877,163 @@ final class PreviewSnapshotClient
 		}
 	}
 
+	private void dispatchAsync()
+	{
+		final long requestGeneration;
+		synchronized (lock)
+		{
+			requestGeneration = generation;
+		}
+		try
+		{
+			executor.execute(() ->
+			{
+				synchronized (lock)
+				{
+					if (requestGeneration != generation)
+					{
+						return;
+					}
+				}
+				dispatch();
+			});
+		}
+		catch (RuntimeException exception)
+		{
+			fail(requestGeneration, Failure.PROTOCOL_ERROR);
+		}
+	}
+
+	private boolean validateRestoredQueue()
+	{
+		synchronized (lock)
+		{
+			if (credentials == null || durableQueue == null)
+			{
+				return false;
+			}
+			BigInteger previous = null;
+			try
+			{
+				for (DurableSnapshotQueue.Entry entry : durableQueue.pendingEntries())
+				{
+					InFlightBatch batch = queuedBatch(entry, credentials.getConnectionId());
+					BigInteger sequence = new BigInteger(batch.sequence);
+					if (previous != null && !sequence.equals(previous.add(BigInteger.ONE)))
+					{
+						return false;
+					}
+					previous = sequence;
+				}
+				if (previous != null)
+				{
+					nextSequence = nextSequence.max(previous.add(BigInteger.ONE));
+				}
+				return true;
+			}
+			catch (RuntimeException exception)
+			{
+				return false;
+			}
+		}
+	}
+
+	private void failCurrent(Failure failure)
+	{
+		final long currentGeneration;
+		synchronized (lock)
+		{
+			currentGeneration = generation;
+		}
+		fail(currentGeneration, failure);
+	}
+
+	private static InFlightBatch queuedBatch(
+		DurableSnapshotQueue.Entry entry,
+		String expectedConnectionId)
+	{
+		JsonObject body = new JsonParser().parse(entry.getPayload()).getAsJsonObject();
+		if (!ProtocolJson.hasExactKeys(
+			body,
+			"protocolVersion",
+			"batchId",
+			"connectionId",
+			"sessionId",
+			"sequence",
+			"capturedAt",
+			"client",
+			"character",
+			"records")
+			|| ProtocolJson.intValue(body, "protocolVersion") != 1)
+		{
+			throw new IllegalArgumentException("Invalid queued RuneGlass batch");
+		}
+		String batchId = ProtocolJson.stringValue(body, "batchId");
+		String connectionId = ProtocolJson.stringValue(body, "connectionId");
+		String sequence = ProtocolJson.stringValue(body, "sequence");
+		int recordCount = body.getAsJsonArray("records").size();
+		if (!entry.getRecordId().equals(batchId)
+			|| !expectedConnectionId.equals(connectionId)
+			|| !sequence.matches("^[1-9][0-9]{0,19}$")
+			|| recordCount < 1
+			|| recordCount > MAX_PENDING_SNAPSHOTS)
+		{
+			throw new IllegalArgumentException("Invalid queued RuneGlass batch binding");
+		}
+		java.util.UUID.fromString(batchId);
+		return new InFlightBatch(batchId, sequence, entry.getPayload(), recordCount);
+	}
+
+	private static final class SequenceAdvance
+	{
+		private final long generation;
+		private final Listener listener;
+		private final BigInteger nextSequence;
+		private final Failure failure;
+
+		private SequenceAdvance(
+			long generation,
+			Listener listener,
+			BigInteger nextSequence,
+			Failure failure)
+		{
+			this.generation = generation;
+			this.listener = listener;
+			this.nextSequence = nextSequence;
+			this.failure = failure;
+		}
+
+		private static SequenceAdvance none(long generation)
+		{
+			return new SequenceAdvance(generation, null, null, null);
+		}
+
+		private static SequenceAdvance advanced(
+			long generation,
+			Listener listener,
+			BigInteger nextSequence)
+		{
+			return new SequenceAdvance(generation, listener, nextSequence, null);
+		}
+
+		private static SequenceAdvance failure(
+			long generation,
+			Failure failure)
+		{
+			return new SequenceAdvance(generation, null, null, failure);
+		}
+	}
+
 	private static final class InFlightBatch
 	{
+		private final String batchId;
 		private final String sequence;
 		private final String body;
 		private final int recordCount;
 
-		private InFlightBatch(String sequence, String body, int recordCount)
+		private InFlightBatch(String batchId, String sequence, String body, int recordCount)
 		{
+			this.batchId = batchId;
 			this.sequence = sequence;
 			this.body = body;
 			this.recordCount = recordCount;

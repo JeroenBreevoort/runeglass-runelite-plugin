@@ -25,11 +25,9 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
-final class PreviewPairingClient
+final class PairingClient
 {
-	static final String PREVIEW_ENABLED_ENV = "RUNELITE_PHASE2_HTTP_PREVIEW_ENABLED";
-	static final String PREVIEW_KEY_ENV = "RUNELITE_PHASE2_HTTP_PREVIEW_KEY";
-	static final String PREVIEW_BASE_URL = "https://small-cassowary-898.eu-west-1.convex.site/";
+	static final String BASE_URL = "https://fast-duck-448.eu-west-1.convex.site/";
 	static final String VERIFICATION_URI = "https://runeglass.app/settings/runelite";
 
 	private static final String START_PATH = "runelite/v1/pairing/start";
@@ -57,7 +55,6 @@ final class PreviewPairingClient
 
 	enum Failure
 	{
-		CONFIGURATION_MISSING,
 		AUTHORIZATION_DENIED,
 		EXPIRED,
 		PROTOCOL_ERROR,
@@ -98,8 +95,6 @@ final class PreviewPairingClient
 	private final Gson gson;
 	private final ScheduledExecutorService executor;
 	private final HttpUrl baseUrl;
-	private final String previewKey;
-	private final boolean enabled;
 	private final Clock clock;
 	private final SecureRandom secureRandom = new SecureRandom();
 
@@ -112,42 +107,31 @@ final class PreviewPairingClient
 	private int pollIntervalSeconds;
 	private Credentials credentials;
 
-	static PreviewPairingClient fromEnvironment(
+	static PairingClient create(
 		OkHttpClient httpClient,
 		Gson gson,
 		ScheduledExecutorService executor)
 	{
-		return new PreviewPairingClient(
+		return new PairingClient(
 			httpClient,
 			gson,
 			executor,
-			Objects.requireNonNull(HttpUrl.parse(PREVIEW_BASE_URL), "preview base URL"),
-			System.getenv(PREVIEW_KEY_ENV),
-			"true".equals(System.getenv(PREVIEW_ENABLED_ENV)),
+			Objects.requireNonNull(HttpUrl.parse(BASE_URL), "RuneGlass base URL"),
 			Clock.systemUTC());
 	}
 
-	PreviewPairingClient(
+	PairingClient(
 		OkHttpClient httpClient,
 		Gson gson,
 		ScheduledExecutorService executor,
 		HttpUrl baseUrl,
-		String previewKey,
-		boolean enabled,
 		Clock clock)
 	{
 		this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
 		this.gson = Objects.requireNonNull(gson, "gson");
 		this.executor = Objects.requireNonNull(executor, "executor");
 		this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl");
-		this.previewKey = previewKey;
-		this.enabled = enabled;
 		this.clock = Objects.requireNonNull(clock, "clock");
-	}
-
-	boolean isAvailable()
-	{
-		return enabled && previewKey != null && previewKey.length() >= 32;
 	}
 
 	Optional<Credentials> getCredentials()
@@ -161,13 +145,6 @@ final class PreviewPairingClient
 	void start(Listener listener)
 	{
 		Objects.requireNonNull(listener, "listener");
-		if (!isAvailable())
-		{
-			cancel();
-			listener.onFailure(Failure.CONFIGURATION_MISSING);
-			return;
-		}
-
 		final long requestGeneration;
 		final String nextCredential = generateOpaqueValue();
 		synchronized (lock)
@@ -213,8 +190,8 @@ final class PreviewPairingClient
 			return;
 		}
 
-		JsonObject body = PreviewProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
-		if (!PreviewProtocolJson.hasExactKeys(
+		JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+		if (!ProtocolJson.hasExactKeys(
 			body,
 			"protocolVersion",
 			"deviceCode",
@@ -222,17 +199,17 @@ final class PreviewPairingClient
 			"verificationUri",
 			"expiresInSeconds",
 			"pollIntervalSeconds")
-			|| PreviewProtocolJson.intValue(body, "protocolVersion") != 1)
+			|| ProtocolJson.intValue(body, "protocolVersion") != 1)
 		{
 			fail(requestGeneration, listener, Failure.PROTOCOL_ERROR);
 			return;
 		}
 
-		String nextDeviceCode = PreviewProtocolJson.stringValue(body, "deviceCode");
-		String userCode = PreviewProtocolJson.stringValue(body, "userCode");
-		String verificationUri = PreviewProtocolJson.stringValue(body, "verificationUri");
-		int expiresInSeconds = PreviewProtocolJson.intValue(body, "expiresInSeconds");
-		int nextPollInterval = PreviewProtocolJson.intValue(body, "pollIntervalSeconds");
+		String nextDeviceCode = ProtocolJson.stringValue(body, "deviceCode");
+		String userCode = ProtocolJson.stringValue(body, "userCode");
+		String verificationUri = ProtocolJson.stringValue(body, "verificationUri");
+		int expiresInSeconds = ProtocolJson.intValue(body, "expiresInSeconds");
+		int nextPollInterval = ProtocolJson.intValue(body, "pollIntervalSeconds");
 		if (!OPAQUE_VALUE.matcher(nextDeviceCode).matches()
 			|| !USER_CODE.matcher(userCode).matches()
 			|| !VERIFICATION_URI.equals(verificationUri)
@@ -296,7 +273,7 @@ final class PreviewPairingClient
 	{
 		if (response.code() == 429)
 		{
-			JsonObject body = PreviewProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+			JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
 			Integer retryAfterSeconds = retryAfterSeconds(response);
 			if (!isError(body, "rate_limited") || retryAfterSeconds == null)
 			{
@@ -317,7 +294,7 @@ final class PreviewPairingClient
 
 		if (response.code() == 202)
 		{
-			JsonObject body = PreviewProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+			JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
 			if (!isError(body, "authorization_pending"))
 			{
 				fail(requestGeneration, listener, Failure.PROTOCOL_ERROR);
@@ -343,24 +320,24 @@ final class PreviewPairingClient
 			return;
 		}
 
-		JsonObject body = PreviewProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
-		if (!PreviewProtocolJson.hasExactKeys(
+		JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+		if (!ProtocolJson.hasExactKeys(
 			body,
 			"protocolVersion",
 			"status",
 			"connectionId",
 			"credentialType",
 			"scope")
-			|| PreviewProtocolJson.intValue(body, "protocolVersion") != 1
-			|| !"issued".equals(PreviewProtocolJson.stringValue(body, "status"))
-			|| !"Bearer".equals(PreviewProtocolJson.stringValue(body, "credentialType"))
-			|| !"skills:write".equals(PreviewProtocolJson.stringValue(body, "scope")))
+			|| ProtocolJson.intValue(body, "protocolVersion") != 1
+			|| !"issued".equals(ProtocolJson.stringValue(body, "status"))
+			|| !"Bearer".equals(ProtocolJson.stringValue(body, "credentialType"))
+			|| !"skills:write".equals(ProtocolJson.stringValue(body, "scope")))
 		{
 			fail(requestGeneration, listener, Failure.PROTOCOL_ERROR);
 			return;
 		}
 
-		String connectionId = PreviewProtocolJson.stringValue(body, "connectionId");
+		String connectionId = ProtocolJson.stringValue(body, "connectionId");
 		if (!CONNECTION_ID.matcher(connectionId).matches())
 		{
 			fail(requestGeneration, listener, Failure.PROTOCOL_ERROR);
@@ -481,11 +458,10 @@ final class PreviewPairingClient
 
 	private Request jsonRequest(String path, JsonObject payload)
 	{
-		HttpUrl url = Objects.requireNonNull(baseUrl.resolve(path), "preview route");
+		HttpUrl url = Objects.requireNonNull(baseUrl.resolve(path), "RuneGlass route");
 		return new Request.Builder()
 			.url(url)
 			.header("Accept", "application/json")
-			.header("X-Runeglass-Preview-Key", previewKey)
 			.post(RequestBody.create(JSON, gson.toJson(payload)))
 			.build();
 	}
@@ -494,7 +470,7 @@ final class PreviewPairingClient
 	{
 		try
 		{
-			JsonObject body = PreviewProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+			JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
 			if (isError(body, "authorization_denied"))
 			{
 				return Failure.AUTHORIZATION_DENIED;
@@ -513,9 +489,9 @@ final class PreviewPairingClient
 
 	private static boolean isError(JsonObject body, String error)
 	{
-		return PreviewProtocolJson.hasExactKeys(body, "protocolVersion", "error")
-			&& PreviewProtocolJson.intValue(body, "protocolVersion") == 1
-			&& error.equals(PreviewProtocolJson.stringValue(body, "error"));
+		return ProtocolJson.hasExactKeys(body, "protocolVersion", "error")
+			&& ProtocolJson.intValue(body, "protocolVersion") == 1
+			&& error.equals(ProtocolJson.stringValue(body, "error"));
 	}
 
 	private static Integer retryAfterSeconds(Response response)

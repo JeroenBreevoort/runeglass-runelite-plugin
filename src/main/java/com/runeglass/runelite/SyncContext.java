@@ -10,9 +10,9 @@ import net.runelite.api.WorldType;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.RuneLiteProperties;
 
-final class PreviewSyncContext
+final class SyncContext
 {
-	static final String PLUGIN_VERSION = "0.1.0";
+	static final String PLUGIN_VERSION = "1.0.0";
 
 	private static final Pattern DISPLAY_NAME = Pattern.compile("^[A-Za-z0-9 _-]{1,12}$");
 
@@ -24,7 +24,7 @@ final class PreviewSyncContext
 	private final String runeLiteVersion;
 	private final int gameRevision;
 
-	static PreviewSyncContext capture(Client client, UUID sessionId)
+	static SyncContext capture(Client client, UUID sessionId)
 	{
 		Objects.requireNonNull(client, "client");
 		Objects.requireNonNull(sessionId, "sessionId");
@@ -36,7 +36,7 @@ final class PreviewSyncContext
 			throw new IllegalStateException("Unsupported display name");
 		}
 
-		return new PreviewSyncContext(
+		return new SyncContext(
 			sessionId.toString(),
 			name,
 			accountType(client.getVarbitValue(VarbitID.IRONMAN)),
@@ -46,7 +46,7 @@ final class PreviewSyncContext
 			client.getRevision());
 	}
 
-	PreviewSyncContext(
+	SyncContext(
 		String sessionId,
 		String displayName,
 		String accountType,

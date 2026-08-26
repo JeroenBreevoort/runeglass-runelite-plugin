@@ -6,6 +6,8 @@ import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.math.BigInteger;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
@@ -23,6 +25,7 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.RuneLite;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import okhttp3.OkHttpClient;
@@ -45,9 +48,6 @@ public class RuneGlassPlugin extends Plugin
 	private RuneGlassConfig config;
 
 	@Inject
-	private MockSnapshotTransport transport;
-
-	@Inject
 	private OkHttpClient httpClient;
 
 	@Inject
@@ -62,23 +62,29 @@ public class RuneGlassPlugin extends Plugin
 	@Inject
 	private ClientToolbar clientToolbar;
 
+	@Inject
+	private ConfigManager configManager;
+
 	private final SkillsSyncSession session = new SkillsSyncSession();
 	private final LoginBaselineGate baselineGate = new LoginBaselineGate();
-	private PreviewPairingClient previewPairingClient;
-	private PreviewSnapshotClient previewSnapshotClient;
+	private PairingClient pairingClient;
+	private SnapshotClient snapshotClient;
+	private ConnectionStateStore connectionStateStore;
 	private RuneGlassPanel panel;
 	private NavigationButton navigationButton;
-	private UUID previewSessionId;
-	private SkillsSnapshot latestSnapshot;
+	private UUID syncSessionId;
+	private volatile SkillsSnapshot latestSnapshot;
+	private PairingClient.Credentials activeCredentials;
+	private String activeProfileKey;
 
 	@Override
 	protected void startUp()
 	{
-		previewPairingClient = PreviewPairingClient.fromEnvironment(httpClient, gson, executor);
-		previewSnapshotClient = PreviewSnapshotClient.fromEnvironment(httpClient, gson, executor);
+		pairingClient = PairingClient.create(httpClient, gson, executor);
+		snapshotClient = SnapshotClient.create(httpClient, gson, executor);
 		panel = new RuneGlassPanel(
-			() -> clientThread.invokeLater(this::startPreviewPairing),
-			() -> clientThread.invokeLater(this::stopPreviewPairing),
+			() -> clientThread.invokeLater(this::startPairing),
+			() -> clientThread.invokeLater(this::stopPairing),
 			() -> clientThread.invokeLater(this::requestManualSync));
 		navigationButton = NavigationButton.builder()
 			.tooltip("RuneGlass Sync")
@@ -88,7 +94,7 @@ public class RuneGlassPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navigationButton);
 
-		LOG.debug("RuneGlass started with mock transport and gated preview pairing and skills upload");
+		LOG.debug("RuneGlass started");
 		if (config.syncEnabled() && client.getGameState() == GameState.LOGGED_IN)
 		{
 			startSession();
@@ -100,14 +106,13 @@ public class RuneGlassPlugin extends Plugin
 	protected void shutDown()
 	{
 		finishSession(SnapshotReason.LOGOUT_FLUSH);
-		transport.clear();
-		if (previewPairingClient != null)
+		if (pairingClient != null)
 		{
-			previewPairingClient.cancel();
+			pairingClient.cancel();
 		}
-		if (previewSnapshotClient != null)
+		if (snapshotClient != null)
 		{
-			previewSnapshotClient.closeAfterFlush();
+			snapshotClient.closeAfterFlush();
 		}
 		if (navigationButton != null)
 		{
@@ -115,10 +120,13 @@ public class RuneGlassPlugin extends Plugin
 		}
 		panel = null;
 		navigationButton = null;
-		previewPairingClient = null;
-		previewSnapshotClient = null;
-		previewSessionId = null;
+		pairingClient = null;
+		snapshotClient = null;
+		connectionStateStore = null;
+		syncSessionId = null;
 		latestSnapshot = null;
+		activeCredentials = null;
+		activeProfileKey = null;
 		LOG.debug("RuneGlass stopped");
 	}
 
@@ -138,12 +146,14 @@ public class RuneGlassPlugin extends Plugin
 		else if (gameState == GameState.HOPPING)
 		{
 			finishSession(SnapshotReason.PROFILE_SWITCH);
-			previewPairingClient.cancelPending();
+			pairingClient.cancelPending();
+			snapshotClient.closeAfterFlush();
 		}
 		else if (gameState == GameState.LOGIN_SCREEN)
 		{
 			finishSession(SnapshotReason.LOGOUT_FLUSH);
-			previewPairingClient.cancelPending();
+			pairingClient.cancelPending();
+			snapshotClient.closeAfterFlush();
 		}
 		refreshPairingPanel();
 	}
@@ -175,6 +185,7 @@ public class RuneGlassPlugin extends Plugin
 
 		if (baselineGate.onGameTick())
 		{
+			connectRestoredSnapshot();
 			captureCurrentClientState();
 		}
 
@@ -193,10 +204,10 @@ public class RuneGlassPlugin extends Plugin
 		{
 			session.cancel();
 			baselineGate.cancel();
-			transport.clear();
-			previewPairingClient.cancel();
-			previewSnapshotClient.cancel();
-			previewSessionId = null;
+			pairingClient.cancel();
+			snapshotClient.discard();
+			clearStoredConnection();
+			syncSessionId = null;
 			latestSnapshot = null;
 			refreshPairingPanel();
 			return;
@@ -219,15 +230,49 @@ public class RuneGlassPlugin extends Plugin
 	{
 		session.start();
 		baselineGate.arm();
-		previewSessionId = UUID.randomUUID();
+		syncSessionId = UUID.randomUUID();
 		latestSnapshot = null;
-		if (previewPairingClient != null
-			&& previewPairingClient.getCredentials().isPresent()
-			&& previewSnapshotClient != null
-			&& !previewSnapshotClient.isFinishingSession())
+		activeCredentials = null;
+		if (snapshotClient != null)
 		{
-			connectPreviewSnapshot();
+			snapshotClient.cancel();
 		}
+		activeProfileKey = configManager.getRSProfileKey();
+		connectionStateStore = null;
+		if (activeProfileKey != null)
+		{
+			configManager.unsetRSProfileConfiguration(
+				RuneGlassConfig.GROUP,
+				ConnectionStateStore.LEGACY_CONFIG_KEY);
+			connectionStateStore = new ConnectionStateStore(
+				RuneLite.RUNELITE_DIR.toPath().resolve("runeglass").resolve("profiles"),
+				activeProfileKey,
+				gson);
+			ConnectionStateStore store = connectionStateStore;
+			Optional<ConnectionStateStore.State> restored = store.load();
+			if (restored.isPresent())
+			{
+				activeCredentials = restored.get().getCredentials();
+			}
+		}
+	}
+
+	private void connectRestoredSnapshot()
+	{
+		ConnectionStateStore store = connectionStateStore;
+		PairingClient.Credentials credentials = activeCredentials;
+		if (store == null || credentials == null)
+		{
+			return;
+		}
+		Optional<ConnectionStateStore.State> restored = store.load();
+		if (!restored.isPresent()
+			|| !credentials.sameConnection(restored.get().getCredentials()))
+		{
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.PROTOCOL_ERROR);
+			return;
+		}
+		connectSnapshot(credentials, restored.get().getNextSequence());
 	}
 
 	private void captureCurrentClientState()
@@ -252,54 +297,43 @@ public class RuneGlassPlugin extends Plugin
 		{
 			publishFinalLocally(finalSnapshot.get());
 		}
-		else if (previewSnapshotClient != null)
+		else if (snapshotClient != null)
 		{
-			previewSnapshotClient.finishSession();
+			snapshotClient.finishSession();
 		}
 		baselineGate.cancel();
-		previewSessionId = null;
+		syncSessionId = null;
 		latestSnapshot = null;
 	}
 
 	private void publishLocally(SkillsSnapshot snapshot)
 	{
-		transport.publish(snapshot);
 		latestSnapshot = snapshot;
-		if (previewSnapshotClient != null)
+		if (snapshotClient != null)
 		{
-			previewSnapshotClient.publish(snapshot);
+			snapshotClient.publish(snapshot);
 		}
-		LOG.debug(
-			"Captured {} catalog {} snapshot in the local mock transport",
-			snapshot.getReason(),
-			snapshot.getCatalogVersion());
+		LOG.debug("Captured {} catalog {} snapshot", snapshot.getReason(), snapshot.getCatalogVersion());
 	}
 
 	private void publishFinalLocally(SkillsSnapshot snapshot)
 	{
-		transport.publish(snapshot);
 		latestSnapshot = snapshot;
-		if (previewSnapshotClient != null)
+		if (snapshotClient != null)
 		{
-			previewSnapshotClient.finishSession(snapshot);
+			snapshotClient.finishSession(snapshot);
 		}
-		LOG.debug(
-			"Captured {} catalog {} final snapshot in the local mock transport",
-			snapshot.getReason(),
-			snapshot.getCatalogVersion());
+		LOG.debug("Captured {} catalog {} final snapshot", snapshot.getReason(), snapshot.getCatalogVersion());
 	}
 
 	private void publishManualLocally(SkillsSnapshot snapshot)
 	{
-		transport.publish(snapshot);
 		latestSnapshot = snapshot;
-		if (previewSnapshotClient != null)
+		if (snapshotClient != null)
 		{
-			previewSnapshotClient.publishImmediately(snapshot);
+			snapshotClient.publishImmediately(snapshot);
 		}
-		LOG.debug(
-			"Captured manual catalog {} snapshot in the local mock transport",
-			snapshot.getCatalogVersion());
+		LOG.debug("Captured manual catalog {} snapshot", snapshot.getCatalogVersion());
 	}
 
 	private void requestManualSync()
@@ -307,10 +341,9 @@ public class RuneGlassPlugin extends Plugin
 		if (!config.syncEnabled()
 			|| !session.isActive()
 			|| client.getGameState() != GameState.LOGGED_IN
-			|| previewPairingClient == null
-			|| !previewPairingClient.getCredentials().isPresent()
-			|| previewSnapshotClient == null
-			|| previewSnapshotClient.isFinishingSession())
+			|| activeCredentials == null
+			|| snapshotClient == null
+			|| snapshotClient.isFinishingSession())
 		{
 			refreshPairingPanel();
 			return;
@@ -320,13 +353,12 @@ public class RuneGlassPlugin extends Plugin
 		session.manualSync(Instant.now()).ifPresent(this::publishManualLocally);
 	}
 
-	private void startPreviewPairing()
+	private void startPairing()
 	{
-		PreviewPairingClient currentClient = previewPairingClient;
+		PairingClient currentClient = pairingClient;
 		RuneGlassPanel currentPanel = panel;
 		if (currentClient == null
 			|| currentPanel == null
-			|| !currentClient.isAvailable()
 			|| !config.syncEnabled()
 			|| client.getGameState() != GameState.LOGGED_IN)
 		{
@@ -335,7 +367,7 @@ public class RuneGlassPlugin extends Plugin
 		}
 
 		currentPanel.showStarting();
-		currentClient.start(new PreviewPairingClient.Listener()
+		currentClient.start(new PairingClient.Listener()
 		{
 			@Override
 			public void onCode(String userCode, Instant expiresAt)
@@ -350,11 +382,27 @@ public class RuneGlassPlugin extends Plugin
 			@Override
 			public void onConnected()
 			{
-				clientThread.invokeLater(RuneGlassPlugin.this::connectPreviewSnapshot);
+				clientThread.invokeLater(() ->
+				{
+					Optional<PairingClient.Credentials> credentials = currentClient.getCredentials();
+					if (!credentials.isPresent() || connectionStateStore == null)
+					{
+						handleSnapshotFailure(SnapshotClient.Failure.REJECTED_BATCH);
+						return;
+					}
+					activeCredentials = credentials.get();
+					activeProfileKey = configManager.getRSProfileKey();
+					if (!connectionStateStore.save(activeCredentials, BigInteger.ONE))
+					{
+						handleSnapshotFailure(SnapshotClient.Failure.PROTOCOL_ERROR);
+						return;
+					}
+					connectSnapshot(activeCredentials, BigInteger.ONE);
+				});
 			}
 
 			@Override
-			public void onFailure(PreviewPairingClient.Failure failure)
+			public void onFailure(PairingClient.Failure failure)
 			{
 				RuneGlassPanel currentPanel = panel;
 				if (currentPanel != null)
@@ -365,114 +413,151 @@ public class RuneGlassPlugin extends Plugin
 		});
 	}
 
-	private void stopPreviewPairing()
+	private void stopPairing()
 	{
-		if (previewPairingClient != null)
+		if (pairingClient != null)
 		{
-			previewPairingClient.cancel();
+			pairingClient.cancel();
 		}
-		if (previewSnapshotClient != null)
+		if (snapshotClient != null)
 		{
-			previewSnapshotClient.cancel();
+			snapshotClient.discard();
 		}
+		clearStoredConnection();
 		refreshPairingPanel();
 	}
 
-	private void connectPreviewSnapshot()
+	private void connectSnapshot(
+		PairingClient.Credentials credentials,
+		BigInteger nextSequence)
 	{
-		PreviewPairingClient pairingClient = previewPairingClient;
-		PreviewSnapshotClient snapshotClient = previewSnapshotClient;
+		SnapshotClient currentSnapshotClient = snapshotClient;
 		RuneGlassPanel currentPanel = panel;
-		UUID sessionId = previewSessionId;
-		if (pairingClient == null
-			|| snapshotClient == null
+		UUID sessionId = syncSessionId;
+		if (currentSnapshotClient == null
 			|| currentPanel == null
 			|| sessionId == null
+			|| activeCredentials == null
+			|| !activeCredentials.sameConnection(credentials)
 			|| client.getGameState() != GameState.LOGGED_IN)
 		{
-			stopPreviewPairing();
+			refreshPairingPanel();
 			return;
 		}
-		if (snapshotClient.isFinishingSession())
-		{
-			return;
-		}
-		Optional<PreviewPairingClient.Credentials> credentials = pairingClient.getCredentials();
-		if (!credentials.isPresent())
-		{
-			stopPreviewPairing();
-			return;
-		}
-
-		final PreviewSyncContext context;
+		final SyncContext context;
 		try
 		{
-			context = PreviewSyncContext.capture(client, sessionId);
+			context = SyncContext.capture(client, sessionId);
 		}
 		catch (RuntimeException exception)
 		{
-			pairingClient.cancel();
-			snapshotClient.cancel();
-			currentPanel.showSnapshotFailure(PreviewSnapshotClient.Failure.REJECTED_BATCH);
+			currentSnapshotClient.cancel();
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.REJECTED_BATCH);
 			return;
 		}
 
-		currentPanel.showConnected();
-		if (!snapshotClient.connect(
-			credentials.get(),
-			context,
-			new PreviewSnapshotClient.Listener()
+		Path queueDirectory = RuneLite.RUNELITE_DIR.toPath()
+			.resolve("runeglass")
+			.resolve(credentials.getConnectionId());
+		try
+		{
+			executor.execute(() ->
 			{
-				@Override
-				public void onUploading(int recordCount)
+				final DurableSnapshotQueue queue;
+				try
+				{
+					queue = new DurableSnapshotQueue(queueDirectory, gson, java.time.Clock.systemUTC());
+				}
+				catch (java.io.IOException exception)
+				{
+					clientThread.invokeLater(() ->
+						handleSnapshotFailure(credentials, SnapshotClient.Failure.PROTOCOL_ERROR));
+					return;
+				}
+				boolean connected = currentSnapshotClient.connect(
+					credentials,
+					context,
+					nextSequence,
+					queue,
+					new SnapshotClient.Listener()
+					{
+						@Override
+						public void onUploading(int recordCount)
+						{
+							RuneGlassPanel activePanel = panel;
+							if (activePanel != null)
+							{
+								activePanel.showUploading(recordCount);
+							}
+						}
+
+						@Override
+						public void onAccepted(Instant serverTime)
+						{
+							RuneGlassPanel activePanel = panel;
+							if (activePanel != null)
+							{
+								activePanel.showSynced(serverTime);
+							}
+						}
+
+						@Override
+						public void onRetryScheduled()
+						{
+							RuneGlassPanel activePanel = panel;
+							if (activePanel != null)
+							{
+								activePanel.showRetrying();
+							}
+						}
+
+						@Override
+						public void onFailure(SnapshotClient.Failure failure)
+						{
+							clientThread.invokeLater(() -> handleSnapshotFailure(credentials, failure));
+						}
+
+						@Override
+						public void onNextSequenceChanged(BigInteger changedNextSequence)
+						{
+							clientThread.invokeLater(() ->
+								saveNextSequence(credentials, changedNextSequence));
+						}
+
+						@Override
+						public void onSessionDrained()
+						{
+							clientThread.invokeLater(RuneGlassPlugin.this::reconnectAfterSessionDrain);
+						}
+					}
+				);
+				if (!connected)
+				{
+					clientThread.invokeLater(() ->
+						handleSnapshotFailure(credentials, SnapshotClient.Failure.PROTOCOL_ERROR));
+					return;
+				}
+				clientThread.invokeLater(() ->
 				{
 					RuneGlassPanel activePanel = panel;
-					if (activePanel != null)
+					if (activePanel != null
+						&& activeCredentials != null
+						&& activeCredentials.sameConnection(credentials))
 					{
-						activePanel.showUploading(recordCount);
+						activePanel.showConnected();
 					}
-				}
+				});
 
-				@Override
-				public void onAccepted(Instant serverTime)
+				SkillsSnapshot snapshot = latestSnapshot;
+				if (snapshot != null)
 				{
-					RuneGlassPanel activePanel = panel;
-					if (activePanel != null)
-					{
-						activePanel.showSynced(serverTime);
-					}
+					currentSnapshotClient.publish(snapshot);
 				}
-
-				@Override
-				public void onRetryScheduled()
-				{
-					RuneGlassPanel activePanel = panel;
-					if (activePanel != null)
-					{
-						activePanel.showRetrying();
-					}
-				}
-
-				@Override
-				public void onFailure(PreviewSnapshotClient.Failure failure)
-				{
-					clientThread.invokeLater(() -> handleSnapshotFailure(failure));
-				}
-
-				@Override
-				public void onSessionDrained()
-				{
-					clientThread.invokeLater(RuneGlassPlugin.this::reconnectAfterSessionDrain);
-				}
-			}))
-		{
-			return;
+			});
 		}
-
-		SkillsSnapshot snapshot = latestSnapshot;
-		if (snapshot != null)
+		catch (RuntimeException exception)
 		{
-			snapshotClient.publish(snapshot);
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.PROTOCOL_ERROR);
 		}
 	}
 
@@ -481,27 +566,46 @@ public class RuneGlassPlugin extends Plugin
 		if (config.syncEnabled()
 			&& session.isActive()
 			&& client.getGameState() == GameState.LOGGED_IN
-			&& previewPairingClient != null
-			&& previewPairingClient.getCredentials().isPresent())
+			&& connectionStateStore != null)
 		{
-			connectPreviewSnapshot();
+			Optional<ConnectionStateStore.State> restored = connectionStateStore.load();
+			if (restored.isPresent())
+			{
+				activeCredentials = restored.get().getCredentials();
+				activeProfileKey = configManager.getRSProfileKey();
+				connectSnapshot(activeCredentials, restored.get().getNextSequence());
+				return;
+			}
 		}
-		else
+		refreshPairingPanel();
+	}
+
+	private void handleSnapshotFailure(SnapshotClient.Failure failure)
+	{
+		PairingClient.Credentials credentials = activeCredentials;
+		if (credentials != null)
 		{
-			refreshPairingPanel();
+			handleSnapshotFailure(credentials, failure);
 		}
 	}
 
-	private void handleSnapshotFailure(PreviewSnapshotClient.Failure failure)
+	private void handleSnapshotFailure(
+		PairingClient.Credentials expectedCredentials,
+		SnapshotClient.Failure failure)
 	{
-		if (previewPairingClient != null)
+		if (activeCredentials == null || !activeCredentials.sameConnection(expectedCredentials))
 		{
-			previewPairingClient.cancel();
+			return;
 		}
-		if (previewSnapshotClient != null)
+		if (pairingClient != null)
 		{
-			previewSnapshotClient.cancel();
+			pairingClient.cancel();
 		}
+		if (snapshotClient != null)
+		{
+			snapshotClient.discard();
+		}
+		clearStoredConnection();
 		RuneGlassPanel currentPanel = panel;
 		if (currentPanel != null)
 		{
@@ -509,19 +613,47 @@ public class RuneGlassPlugin extends Plugin
 		}
 	}
 
+	private void saveNextSequence(
+		PairingClient.Credentials expectedCredentials,
+		BigInteger nextSequence)
+	{
+		ConnectionStateStore store = connectionStateStore;
+		if (store == null
+			|| activeCredentials == null
+			|| !activeCredentials.sameConnection(expectedCredentials)
+			|| activeProfileKey == null
+			|| !activeProfileKey.equals(configManager.getRSProfileKey()))
+		{
+			return;
+		}
+		if (!store.save(expectedCredentials, nextSequence))
+		{
+			handleSnapshotFailure(expectedCredentials, SnapshotClient.Failure.PROTOCOL_ERROR);
+		}
+	}
+
+	private void clearStoredConnection()
+	{
+		ConnectionStateStore store = connectionStateStore;
+		if (store != null
+			&& activeProfileKey != null
+			&& activeProfileKey.equals(configManager.getRSProfileKey()))
+		{
+			store.clear();
+		}
+		activeCredentials = null;
+		activeProfileKey = null;
+	}
+
 	private void refreshPairingPanel()
 	{
 		RuneGlassPanel currentPanel = panel;
-		PreviewPairingClient currentClient = previewPairingClient;
+		PairingClient currentClient = pairingClient;
 		if (currentPanel == null || currentClient == null)
 		{
 			return;
 		}
-		if (!currentClient.isAvailable())
-		{
-			currentPanel.showUnavailable();
-		}
-		else if (!config.syncEnabled())
+		if (!config.syncEnabled())
 		{
 			currentPanel.showSyncDisabled();
 		}
@@ -529,7 +661,7 @@ public class RuneGlassPlugin extends Plugin
 		{
 			currentPanel.showLoggedOut();
 		}
-		else if (currentClient.getCredentials().isPresent())
+		else if (activeCredentials != null)
 		{
 			currentPanel.showConnected();
 		}

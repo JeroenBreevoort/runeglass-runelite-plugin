@@ -11,9 +11,9 @@ import java.util.Set;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
 
-final class PreviewProtocolJson
+final class ProtocolJson
 {
-	private PreviewProtocolJson()
+	private ProtocolJson()
 	{
 	}
 
@@ -24,7 +24,7 @@ final class PreviewProtocolJson
 			|| responseBody == null
 			|| responseBody.contentLength() > maximumCharacters)
 		{
-			throw new IOException("Invalid preview response");
+			throw new IOException("Invalid RuneGlass response");
 		}
 
 		StringBuilder text = new StringBuilder();
@@ -36,7 +36,7 @@ final class PreviewProtocolJson
 			{
 				if (text.length() + count > maximumCharacters)
 				{
-					throw new IOException("Preview response is too large");
+					throw new IOException("RuneGlass response is too large");
 				}
 				text.append(buffer, 0, count);
 			}
@@ -45,7 +45,7 @@ final class PreviewProtocolJson
 		JsonElement parsed = new JsonParser().parse(text.toString());
 		if (!parsed.isJsonObject())
 		{
-			throw new IOException("Preview response must be an object");
+			throw new IOException("RuneGlass response must be an object");
 		}
 		return parsed.getAsJsonObject();
 	}

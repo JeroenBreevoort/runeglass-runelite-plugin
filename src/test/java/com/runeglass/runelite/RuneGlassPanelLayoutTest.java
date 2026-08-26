@@ -35,7 +35,7 @@ public class RuneGlassPanelLayoutTest
 			states.add(() -> panel.showSynced(Instant.parse("2026-08-24T14:15:00Z")));
 			states.add(panel::showRetrying);
 			states.add(() -> panel.showSnapshotFailure(
-				PreviewSnapshotClient.Failure.BINDING_MISMATCH));
+				SnapshotClient.Failure.BINDING_MISMATCH));
 
 			for (Runnable state : states)
 			{

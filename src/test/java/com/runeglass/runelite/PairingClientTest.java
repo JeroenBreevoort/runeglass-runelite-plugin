@@ -27,15 +27,14 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-public class PreviewPairingClientTest
+public class PairingClientTest
 {
-	private static final String PREVIEW_KEY = "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk";
 	private static final String DEVICE_CODE = "ddddddddddddddddddddddddddddddddddddddddddd";
 	private static final String CONNECTION_ID = "pcn_ccccccccccccccccccccccccccccccccccccccccccc";
 
 	private MockWebServer server;
 	private ScheduledExecutorService executor;
-	private PreviewPairingClient client;
+	private PairingClient client;
 
 	@Before
 	public void setUp() throws IOException
@@ -48,7 +47,7 @@ public class PreviewPairingClientTest
 			thread.setDaemon(true);
 			return thread;
 		});
-		client = client(server.url("/"), true, PREVIEW_KEY);
+		client = client(server.url("/"));
 	}
 
 	@After
@@ -68,7 +67,7 @@ public class PreviewPairingClientTest
 		server.enqueue(json(201,
 			"{\"protocolVersion\":1,\"deviceCode\":\"" + DEVICE_CODE
 				+ "\",\"userCode\":\"ABCDE-F2345\","
-				+ "\"verificationUri\":\"" + PreviewPairingClient.VERIFICATION_URI + "\","
+				+ "\"verificationUri\":\"" + PairingClient.VERIFICATION_URI + "\","
 				+ "\"expiresInSeconds\":60,\"pollIntervalSeconds\":1}"));
 		server.enqueue(json(202, "{\"protocolVersion\":1,\"error\":\"authorization_pending\"}"));
 		server.enqueue(json(200,
@@ -78,7 +77,7 @@ public class PreviewPairingClientTest
 
 		CountDownLatch codeReceived = new CountDownLatch(1);
 		CountDownLatch connected = new CountDownLatch(1);
-		AtomicReference<PreviewPairingClient.Failure> failure = new AtomicReference<>();
+		AtomicReference<PairingClient.Failure> failure = new AtomicReference<>();
 		client.start(listener(codeReceived, connected, failure));
 
 		assertTrue(codeReceived.await(2, TimeUnit.SECONDS));
@@ -95,14 +94,14 @@ public class PreviewPairingClientTest
 		RecordedRequest issued = assertRequest("/runelite/v1/pairing/token");
 		assertEquals(DEVICE_CODE, parseBody(issued).get("deviceCode").getAsString());
 
-		Optional<PreviewPairingClient.Credentials> credentials = client.getCredentials();
+		Optional<PairingClient.Credentials> credentials = client.getCredentials();
 		assertTrue(credentials.isPresent());
 		assertEquals(CONNECTION_ID, credentials.get().getConnectionId());
 		String rawCredential = credentials.get().getRawCredential();
 		assertTrue(rawCredential.matches("^[A-Za-z0-9_-]{43}$"));
 		assertEquals(
 			credentialHash,
-			PreviewPairingClient.hashConnectionCredential(rawCredential));
+			PairingClient.hashConnectionCredential(rawCredential));
 		assertFalse(start.getBody().readUtf8().contains(rawCredential));
 		assertNotEquals(rawCredential, credentialHash);
 
@@ -119,12 +118,12 @@ public class PreviewPairingClientTest
 		server.enqueue(json(201,
 			"{\"protocolVersion\":1,\"deviceCode\":\"" + DEVICE_CODE
 				+ "\",\"userCode\":\"ABCDE-F2345\","
-				+ "\"verificationUri\":\"" + PreviewPairingClient.VERIFICATION_URI + "\","
+				+ "\"verificationUri\":\"" + PairingClient.VERIFICATION_URI + "\","
 				+ "\"expiresInSeconds\":60,\"pollIntervalSeconds\":1,\"unexpected\":true}"));
 
 		CountDownLatch failureReceived = new CountDownLatch(1);
-		AtomicReference<PreviewPairingClient.Failure> failure = new AtomicReference<>();
-		client.start(new PreviewPairingClient.Listener()
+		AtomicReference<PairingClient.Failure> failure = new AtomicReference<>();
+		client.start(new PairingClient.Listener()
 		{
 			@Override
 			public void onCode(String userCode, java.time.Instant expiresAt)
@@ -139,7 +138,7 @@ public class PreviewPairingClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewPairingClient.Failure nextFailure)
+			public void onFailure(PairingClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 				failureReceived.countDown();
@@ -147,7 +146,7 @@ public class PreviewPairingClientTest
 		});
 
 		assertTrue(failureReceived.await(2, TimeUnit.SECONDS));
-		assertEquals(PreviewPairingClient.Failure.PROTOCOL_ERROR, failure.get());
+		assertEquals(PairingClient.Failure.PROTOCOL_ERROR, failure.get());
 		assertEquals(1, server.getRequestCount());
 		assertFalse(client.getCredentials().isPresent());
 	}
@@ -158,12 +157,12 @@ public class PreviewPairingClientTest
 		server.enqueue(json(201,
 			"{\"protocolVersion\":1,\"deviceCode\":\"" + DEVICE_CODE
 				+ "\",\"userCode\":\"ABCDE-F2345\","
-				+ "\"verificationUri\":\"" + PreviewPairingClient.VERIFICATION_URI + "\","
+				+ "\"verificationUri\":\"" + PairingClient.VERIFICATION_URI + "\","
 				+ "\"expiresInSeconds\":60,\"pollIntervalSeconds\":1}"));
 
 		CountDownLatch codeReceived = new CountDownLatch(1);
 		CountDownLatch terminalCallback = new CountDownLatch(1);
-		client.start(new PreviewPairingClient.Listener()
+		client.start(new PairingClient.Listener()
 		{
 			@Override
 			public void onCode(String userCode, java.time.Instant expiresAt)
@@ -178,7 +177,7 @@ public class PreviewPairingClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewPairingClient.Failure failure)
+			public void onFailure(PairingClient.Failure failure)
 			{
 				terminalCallback.countDown();
 			}
@@ -197,7 +196,7 @@ public class PreviewPairingClientTest
 		server.enqueue(json(201,
 			"{\"protocolVersion\":1,\"deviceCode\":\"" + DEVICE_CODE
 				+ "\",\"userCode\":\"ABCDE-F2345\","
-				+ "\"verificationUri\":\"" + PreviewPairingClient.VERIFICATION_URI + "\","
+				+ "\"verificationUri\":\"" + PairingClient.VERIFICATION_URI + "\","
 				+ "\"expiresInSeconds\":60,\"pollIntervalSeconds\":1}"));
 		server.enqueue(json(429, "{\"protocolVersion\":1,\"error\":\"rate_limited\"}")
 			.setHeader("Retry-After", "1"));
@@ -207,7 +206,7 @@ public class PreviewPairingClientTest
 				+ "\",\"credentialType\":\"Bearer\",\"scope\":\"skills:write\"}"));
 
 		CountDownLatch connected = new CountDownLatch(1);
-		AtomicReference<PreviewPairingClient.Failure> failure = new AtomicReference<>();
+		AtomicReference<PairingClient.Failure> failure = new AtomicReference<>();
 		client.start(listener(new CountDownLatch(1), connected, failure));
 
 		assertTrue(connected.await(4, TimeUnit.SECONDS));
@@ -222,55 +221,40 @@ public class PreviewPairingClientTest
 		assertTerminalPairingFailure(
 			403,
 			"authorization_denied",
-			PreviewPairingClient.Failure.AUTHORIZATION_DENIED);
+			PairingClient.Failure.AUTHORIZATION_DENIED);
 		assertTerminalPairingFailure(
 			400,
 			"expired_device_code",
-			PreviewPairingClient.Failure.EXPIRED);
+			PairingClient.Failure.EXPIRED);
 	}
 
-	@Test
-	public void disabledPreviewFailsClosedWithoutNetworkRequest() throws Exception
+	private PairingClient client(HttpUrl baseUrl)
 	{
-		client.cancel();
-		client = client(server.url("/"), false, PREVIEW_KEY);
-		AtomicReference<PreviewPairingClient.Failure> failure = new AtomicReference<>();
-		client.start(listener(new CountDownLatch(1), new CountDownLatch(1), failure));
-
-		assertEquals(PreviewPairingClient.Failure.CONFIGURATION_MISSING, failure.get());
-		assertEquals(0, server.getRequestCount());
-		assertFalse(client.getCredentials().isPresent());
-	}
-
-	private PreviewPairingClient client(HttpUrl baseUrl, boolean enabled, String previewKey)
-	{
-		return new PreviewPairingClient(
+		return new PairingClient(
 			new OkHttpClient(),
 			new Gson(),
 			executor,
 			baseUrl,
-			previewKey,
-			enabled,
 			Clock.systemUTC());
 	}
 
 	private void assertTerminalPairingFailure(
 		int status,
 		String error,
-		PreviewPairingClient.Failure expected) throws Exception
+		PairingClient.Failure expected) throws Exception
 	{
 		server.enqueue(json(201,
 			"{\"protocolVersion\":1,\"deviceCode\":\"" + DEVICE_CODE
 				+ "\",\"userCode\":\"ABCDE-F2345\","
-				+ "\"verificationUri\":\"" + PreviewPairingClient.VERIFICATION_URI + "\","
+				+ "\"verificationUri\":\"" + PairingClient.VERIFICATION_URI + "\","
 				+ "\"expiresInSeconds\":60,\"pollIntervalSeconds\":1}"));
 		server.enqueue(json(status,
 			"{\"protocolVersion\":1,\"error\":\"" + error + "\"}"));
 
 		CountDownLatch codeReceived = new CountDownLatch(1);
 		CountDownLatch failed = new CountDownLatch(1);
-		AtomicReference<PreviewPairingClient.Failure> failure = new AtomicReference<>();
-		client.start(new PreviewPairingClient.Listener()
+		AtomicReference<PairingClient.Failure> failure = new AtomicReference<>();
+		client.start(new PairingClient.Listener()
 		{
 			@Override
 			public void onCode(String userCode, java.time.Instant expiresAt)
@@ -285,7 +269,7 @@ public class PreviewPairingClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewPairingClient.Failure nextFailure)
+			public void onFailure(PairingClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 				failed.countDown();
@@ -304,7 +288,6 @@ public class PreviewPairingClientTest
 		assertNotNull(request);
 		assertEquals("POST", request.getMethod());
 		assertEquals(path, request.getPath());
-		assertEquals(PREVIEW_KEY, request.getHeader("X-Runeglass-Preview-Key"));
 		assertEquals("application/json", request.getHeader("Accept"));
 		assertEquals("application/json; charset=utf-8", request.getHeader("Content-Type"));
 		return request;
@@ -323,12 +306,12 @@ public class PreviewPairingClientTest
 			.setBody(body);
 	}
 
-	private static PreviewPairingClient.Listener listener(
+	private static PairingClient.Listener listener(
 		CountDownLatch codeReceived,
 		CountDownLatch connected,
-		AtomicReference<PreviewPairingClient.Failure> failure)
+		AtomicReference<PairingClient.Failure> failure)
 	{
-		return new PreviewPairingClient.Listener()
+		return new PairingClient.Listener()
 		{
 			@Override
 			public void onCode(String userCode, java.time.Instant expiresAt)
@@ -343,7 +326,7 @@ public class PreviewPairingClientTest
 			}
 
 			@Override
-			public void onFailure(PreviewPairingClient.Failure nextFailure)
+			public void onFailure(PairingClient.Failure nextFailure)
 			{
 				failure.set(nextFailure);
 			}

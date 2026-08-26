@@ -116,20 +116,7 @@ final class RuneGlassPanel extends PluginPanel
 		});
 		content.add(actionButton);
 		add(content, BorderLayout.NORTH);
-		showUnavailable();
-	}
-
-	void showUnavailable()
-	{
-		onEdt(() -> update(
-			"Development preview unavailable",
-			"—",
-			"Restart this development client with the preview environment enabled. No request is sent while it is unavailable.",
-			"Generate code",
-			false,
-			false,
-			false,
-			false));
+		showSyncDisabled();
 	}
 
 	void showSyncDisabled()
@@ -203,11 +190,11 @@ final class RuneGlassPanel extends PluginPanel
 
 	void showConnected()
 	{
-			onEdt(() -> update(
-				"Connected",
-				"CONNECTED",
-				"Waiting for a complete skills snapshot. Forget locally clears only this client; revoke access in RuneGlass Settings.",
-				"Forget locally",
+		onEdt(() -> update(
+			"Connected",
+			"CONNECTED",
+			"Waiting for a complete skills snapshot. This connection is saved only for the current RuneLite profile.",
+			"Forget on this client",
 			true,
 			true,
 			true,
@@ -223,7 +210,7 @@ final class RuneGlassPanel extends PluginPanel
 			"Connected · syncing",
 			"SYNCING",
 			detail,
-				"Forget locally",
+			"Forget on this client",
 			true,
 			true,
 			true,
@@ -236,9 +223,9 @@ final class RuneGlassPanel extends PluginPanel
 		onEdt(() -> update(
 			"Connected · up to date",
 			"SYNCED",
-				"Skills and XP synced at " + EXPIRY_FORMAT.format(serverTime)
-					+ ". The credential is memory-only; revoke access in RuneGlass Settings.",
-				"Forget locally",
+			"Skills and XP synced at " + EXPIRY_FORMAT.format(serverTime)
+				+ ". Revoke access at any time in RuneGlass Settings.",
+			"Forget on this client",
 			true,
 			true,
 			true,
@@ -250,23 +237,20 @@ final class RuneGlassPanel extends PluginPanel
 		onEdt(() -> update(
 			"Connected · waiting to retry",
 			"WAITING",
-			"RuneGlass is temporarily unavailable. The snapshot is retained in memory and will retry automatically.",
-				"Forget locally",
+			"RuneGlass is temporarily unavailable. Unsent snapshots are retained locally and retry automatically.",
+			"Forget on this client",
 			true,
 			true,
 			true,
 			false));
 	}
 
-	void showSnapshotFailure(PreviewSnapshotClient.Failure failure)
+	void showSnapshotFailure(SnapshotClient.Failure failure)
 	{
 		Objects.requireNonNull(failure, "failure");
 		String detail;
 		switch (failure)
 		{
-			case CONFIGURATION_MISSING:
-				detail = "The development upload preview is not configured. No snapshot was sent.";
-				break;
 			case INVALID_CONNECTION:
 				detail = "This connection is no longer valid. Disconnect it in RuneGlass and pair again.";
 				break;
@@ -274,7 +258,7 @@ final class RuneGlassPanel extends PluginPanel
 				detail = "The logged-in profile does not match the approved character. Sync stopped safely.";
 				break;
 			case UNSUPPORTED_PROFILE:
-				detail = "This preview currently supports standard-profile worlds only.";
+				detail = "RuneGlass Sync currently supports standard-profile worlds only.";
 				break;
 			case REJECTED_BATCH:
 				detail = "RuneGlass rejected this snapshot without replacing stored progress. Pair again before retrying.";
@@ -295,15 +279,12 @@ final class RuneGlassPanel extends PluginPanel
 			false));
 	}
 
-	void showFailure(PreviewPairingClient.Failure failure)
+	void showFailure(PairingClient.Failure failure)
 	{
 		Objects.requireNonNull(failure, "failure");
 		String detail;
 		switch (failure)
 		{
-			case CONFIGURATION_MISSING:
-				detail = "The local development preview is not configured. No request was sent.";
-				break;
 			case AUTHORIZATION_DENIED:
 				detail = "RuneGlass denied this pairing request. Generate a new code to try again.";
 				break;
@@ -311,10 +292,10 @@ final class RuneGlassPanel extends PluginPanel
 				detail = "The pairing code expired. Generate a new code to try again.";
 				break;
 			case PROTOCOL_ERROR:
-				detail = "RuneGlass returned an unexpected preview response. Pairing stopped safely.";
+				detail = "RuneGlass returned an unexpected response. Pairing stopped safely.";
 				break;
 			default:
-				detail = "RuneGlass could not complete pairing. Check the development backend and try again.";
+				detail = "RuneGlass could not complete pairing. Check your connection and try again.";
 				break;
 		}
 		String finalDetail = detail;

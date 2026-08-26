@@ -13,7 +13,7 @@ public interface RuneGlassConfig extends Config
 	@ConfigItem(
 		keyName = "syncEnabled",
 		name = "Enable RuneGlass sync",
-		description = "Opt in to RuneGlass skill synchronization. An explicitly configured development client can pair and send complete skill snapshots; otherwise delivery remains local.",
+		description = "Opt in to sending complete skill and XP snapshots for the current character to RuneGlass.",
 		warning = THIRD_PARTY_WARNING
 	)
 	default boolean syncEnabled()

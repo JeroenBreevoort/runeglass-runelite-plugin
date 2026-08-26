@@ -6,7 +6,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-final class PreviewSyncBatch
+final class SyncBatch
 {
 	private final int protocolVersion = 1;
 	private final String batchId;
@@ -18,12 +18,12 @@ final class PreviewSyncBatch
 	private final CharacterMetadata character;
 	private final List<SkillsSnapshot> records;
 
-	PreviewSyncBatch(
+	SyncBatch(
 		String batchId,
 		String connectionId,
 		String sequence,
 		Instant capturedAt,
-		PreviewSyncContext context,
+		SyncContext context,
 		List<SkillsSnapshot> records)
 	{
 		this.batchId = Objects.requireNonNull(batchId, "batchId");
@@ -46,7 +46,7 @@ final class PreviewSyncBatch
 		private final String runeliteVersion;
 		private final int gameRevision;
 
-		private ClientMetadata(PreviewSyncContext context)
+		private ClientMetadata(SyncContext context)
 		{
 			this.pluginVersion = context.getPluginVersion();
 			this.runeliteVersion = context.getRuneLiteVersion();
@@ -60,7 +60,7 @@ final class PreviewSyncBatch
 		private final String accountType;
 		private final String profileType;
 
-		private CharacterMetadata(PreviewSyncContext context)
+		private CharacterMetadata(SyncContext context)
 		{
 			this.displayName = context.getDisplayName();
 			this.accountType = context.getAccountType();
