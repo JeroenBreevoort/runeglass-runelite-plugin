@@ -194,7 +194,7 @@ final class RuneGlassPanel extends PluginPanel
 			"Connected",
 			"CONNECTED",
 			"Waiting for a complete skills snapshot. This connection is saved only for the current RuneLite profile.",
-			"Forget on this client",
+			"Forget client",
 			true,
 			true,
 			true,
@@ -210,7 +210,7 @@ final class RuneGlassPanel extends PluginPanel
 			"Connected · syncing",
 			"SYNCING",
 			detail,
-			"Forget on this client",
+			"Forget client",
 			true,
 			true,
 			true,
@@ -225,7 +225,7 @@ final class RuneGlassPanel extends PluginPanel
 			"SYNCED",
 			"Skills and XP synced at " + EXPIRY_FORMAT.format(serverTime)
 				+ ". Revoke access at any time in RuneGlass Settings.",
-			"Forget on this client",
+			"Forget client",
 			true,
 			true,
 			true,
@@ -238,7 +238,7 @@ final class RuneGlassPanel extends PluginPanel
 			"Connected · waiting to retry",
 			"WAITING",
 			"RuneGlass is temporarily unavailable. Unsent snapshots are retained locally and retry automatically.",
-			"Forget on this client",
+			"Forget client",
 			true,
 			true,
 			true,
@@ -277,6 +277,32 @@ final class RuneGlassPanel extends PluginPanel
 			false,
 			false,
 			false));
+	}
+
+	void showBirdHousePaused()
+	{
+		onEdt(() -> update(
+			"Connected · bird house sync paused",
+			"PARTIAL",
+			"Skills and XP remain connected. Toggle Sync bird house timers off and on to resume bird house updates.",
+			"Forget client",
+			true,
+			true,
+			true,
+			true));
+	}
+
+	void showFarmingPatchPaused()
+	{
+		onEdt(() -> update(
+			"Connected · farming sync paused",
+			"PARTIAL",
+			"Skills, XP, and other timers remain connected. Toggle Sync farming timers off and on to resume farming updates.",
+			"Forget client",
+			true,
+			true,
+			true,
+			true));
 	}
 
 	void showFailure(PairingClient.Failure failure)

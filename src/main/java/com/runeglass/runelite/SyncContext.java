@@ -12,7 +12,7 @@ import net.runelite.client.RuneLiteProperties;
 
 final class SyncContext
 {
-	static final String PLUGIN_VERSION = "1.0.0";
+	static final String PLUGIN_VERSION = "1.1.0";
 
 	private static final Pattern DISPLAY_NAME = Pattern.compile("^[A-Za-z0-9 _-]{1,12}$");
 

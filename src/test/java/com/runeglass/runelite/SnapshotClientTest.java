@@ -118,7 +118,7 @@ public class SnapshotClientTest
 
 		JsonObject clientBody = body.getAsJsonObject("client");
 		assertExactKeys(clientBody, "pluginVersion", "runeliteVersion", "gameRevision");
-		assertEquals("1.0.0", clientBody.get("pluginVersion").getAsString());
+		assertEquals("1.1.0", clientBody.get("pluginVersion").getAsString());
 		assertEquals("1.12.36", clientBody.get("runeliteVersion").getAsString());
 		assertEquals(231, clientBody.get("gameRevision").getAsInt());
 
@@ -562,7 +562,7 @@ public class SnapshotClientTest
 			"Iron Jeromey",
 			"ironman",
 			"standard",
-			"1.0.0",
+			"1.1.0",
 			"1.12.36",
 			231);
 	}

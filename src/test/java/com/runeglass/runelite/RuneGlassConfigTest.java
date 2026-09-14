@@ -15,8 +15,10 @@ public class RuneGlassConfigTest
 		};
 
 		assertFalse(config.syncEnabled());
+		assertFalse(config.birdHouseSyncEnabled());
+		assertFalse(config.farmingPatchSyncEnabled());
 		assertEquals(
-			"This plugin sends your RuneScape character name, account/profile type, skill levels, experience values, plugin/client versions, and IP address to RuneGlass, a third-party service not controlled or verified by RuneLite developers.",
+			"This plugin sends your RuneScape character name, account/profile type, skill levels, experience values, opted-in timer states and estimated ready times, plugin/client versions, and IP address to RuneGlass, a third-party service not controlled or verified by RuneLite developers.",
 			RuneGlassConfig.THIRD_PARTY_WARNING);
 	}
 }

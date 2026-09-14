@@ -9,13 +9,17 @@ import java.awt.image.BufferedImage;
 import java.math.BigInteger;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.Player;
 import net.runelite.api.Skill;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.StatChanged;
@@ -34,8 +38,8 @@ import org.slf4j.LoggerFactory;
 
 @PluginDescriptor(
 	name = "RuneGlass",
-	description = "Synchronizes your current character's skills and XP with RuneGlass",
-	tags = {"mobile", "progress", "skills", "xp", "sync"}
+	description = "Synchronizes your current character's skills, XP, and opted-in timers with RuneGlass",
+	tags = {"mobile", "progress", "skills", "xp", "timers", "sync"}
 )
 public class RuneGlassPlugin extends Plugin
 {
@@ -67,8 +71,12 @@ public class RuneGlassPlugin extends Plugin
 
 	private final SkillsSyncSession session = new SkillsSyncSession();
 	private final LoginBaselineGate baselineGate = new LoginBaselineGate();
+	private final BirdHouseSnapshotReducer birdHouseReducer = new BirdHouseSnapshotReducer();
+	private final FarmingPatchSnapshotReducer farmingPatchReducer = new FarmingPatchSnapshotReducer();
 	private PairingClient pairingClient;
 	private SnapshotClient snapshotClient;
+	private SemanticSnapshotClient<BirdHouseSnapshot> birdHouseClient;
+	private SemanticSnapshotClient<FarmingPatchSnapshot> farmingPatchClient;
 	private ConnectionStateStore connectionStateStore;
 	private RuneGlassPanel panel;
 	private NavigationButton navigationButton;
@@ -82,6 +90,30 @@ public class RuneGlassPlugin extends Plugin
 	{
 		pairingClient = PairingClient.create(httpClient, gson, executor);
 		snapshotClient = SnapshotClient.create(httpClient, gson, executor);
+		birdHouseClient = SemanticSnapshotClient.create(
+			httpClient,
+			gson,
+			executor,
+			"runelite/v1/bird-houses",
+			(context, connectionId, snapshot) -> SemanticSnapshotPayload.create(
+				context,
+				connectionId,
+				snapshot.getSnapshotId(),
+				snapshot.getObservedAt(),
+				"houses",
+				snapshot.getHouses()));
+		farmingPatchClient = SemanticSnapshotClient.create(
+			httpClient,
+			gson,
+			executor,
+			"runelite/v1/farming-patches",
+			(context, connectionId, snapshot) -> SemanticSnapshotPayload.create(
+				context,
+				connectionId,
+				snapshot.getSnapshotId(),
+				snapshot.getObservedAt(),
+				"patches",
+				snapshot.getPatches()));
 		panel = new RuneGlassPanel(
 			() -> clientThread.invokeLater(this::startPairing),
 			() -> clientThread.invokeLater(this::stopPairing),
@@ -114,6 +146,16 @@ public class RuneGlassPlugin extends Plugin
 		{
 			snapshotClient.closeAfterFlush();
 		}
+		if (birdHouseClient != null)
+		{
+			birdHouseClient.discard();
+		}
+		if (farmingPatchClient != null)
+		{
+			farmingPatchClient.discard();
+		}
+		birdHouseReducer.reset();
+		farmingPatchReducer.reset();
 		if (navigationButton != null)
 		{
 			clientToolbar.removeNavigation(navigationButton);
@@ -122,6 +164,8 @@ public class RuneGlassPlugin extends Plugin
 		navigationButton = null;
 		pairingClient = null;
 		snapshotClient = null;
+		birdHouseClient = null;
+		farmingPatchClient = null;
 		connectionStateStore = null;
 		syncSessionId = null;
 		latestSnapshot = null;
@@ -190,12 +234,56 @@ public class RuneGlassPlugin extends Plugin
 		}
 
 		session.poll(Instant.now()).ifPresent(this::publishLocally);
+		captureBirdHouses();
+		captureFarmingPatch();
 	}
 
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
-		if (!RuneGlassConfig.GROUP.equals(event.getGroup()) || !"syncEnabled".equals(event.getKey()))
+		if (!RuneGlassConfig.GROUP.equals(event.getGroup()))
+		{
+			return;
+		}
+		String key = event.getKey();
+		clientThread.invokeLater(() -> handleConfigChanged(key));
+	}
+
+	private void handleConfigChanged(String key)
+	{
+		if ("birdHouseSyncEnabled".equals(key))
+		{
+			birdHouseReducer.reset();
+			if (birdHouseClient != null)
+			{
+				birdHouseClient.discard();
+			}
+			if (config.syncEnabled()
+				&& config.birdHouseSyncEnabled()
+				&& client.getGameState() == GameState.LOGGED_IN)
+			{
+				connectBirdHouseTransport();
+				captureBirdHouses();
+			}
+			return;
+		}
+		if ("farmingPatchSyncEnabled".equals(key))
+		{
+			farmingPatchReducer.reset();
+			if (farmingPatchClient != null)
+			{
+				farmingPatchClient.discard();
+			}
+			if (config.syncEnabled()
+				&& config.farmingPatchSyncEnabled()
+				&& client.getGameState() == GameState.LOGGED_IN)
+			{
+				connectFarmingPatchTransport();
+				captureFarmingPatch();
+			}
+			return;
+		}
+		if (!"syncEnabled".equals(key))
 		{
 			return;
 		}
@@ -206,6 +294,16 @@ public class RuneGlassPlugin extends Plugin
 			baselineGate.cancel();
 			pairingClient.cancel();
 			snapshotClient.discard();
+			if (birdHouseClient != null)
+			{
+				birdHouseClient.discard();
+			}
+			if (farmingPatchClient != null)
+			{
+				farmingPatchClient.discard();
+			}
+			birdHouseReducer.reset();
+			farmingPatchReducer.reset();
 			clearStoredConnection();
 			syncSessionId = null;
 			latestSnapshot = null;
@@ -230,12 +328,22 @@ public class RuneGlassPlugin extends Plugin
 	{
 		session.start();
 		baselineGate.arm();
+		birdHouseReducer.reset();
+		farmingPatchReducer.reset();
 		syncSessionId = UUID.randomUUID();
 		latestSnapshot = null;
 		activeCredentials = null;
 		if (snapshotClient != null)
 		{
 			snapshotClient.cancel();
+		}
+		if (birdHouseClient != null)
+		{
+			birdHouseClient.discard();
+		}
+		if (farmingPatchClient != null)
+		{
+			farmingPatchClient.discard();
 		}
 		activeProfileKey = configManager.getRSProfileKey();
 		connectionStateStore = null;
@@ -290,6 +398,265 @@ public class RuneGlassPlugin extends Plugin
 		}
 	}
 
+	private void captureBirdHouses()
+	{
+		SemanticSnapshotClient<BirdHouseSnapshot> currentClient = birdHouseClient;
+		Player localPlayer = client.getLocalPlayer();
+		if (!config.syncEnabled()
+			|| !config.birdHouseSyncEnabled()
+			|| baselineGate.isWaiting()
+			|| activeCredentials == null
+			|| currentClient == null
+			|| localPlayer == null
+			|| client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+
+		WorldPoint location = localPlayer.getWorldLocation();
+		BirdHouseSpace[] spaces = BirdHouseSpace.values();
+		int[] varps = new int[spaces.length];
+		for (int index = 0; index < spaces.length; index++)
+		{
+			varps[index] = client.getVarpValue(spaces[index].getVarpId());
+		}
+		birdHouseReducer.observe(
+			location.getRegionID(),
+			location.getPlane(),
+			varps,
+			Instant.now())
+			.ifPresent(snapshot ->
+			{
+				if (currentClient.publish(snapshot))
+				{
+					LOG.debug("Captured four semantic bird house observations");
+				}
+			});
+	}
+
+	private void captureFarmingPatch()
+	{
+		SemanticSnapshotClient<FarmingPatchSnapshot> currentClient = farmingPatchClient;
+		Player localPlayer = client.getLocalPlayer();
+		if (!config.syncEnabled()
+			|| !config.farmingPatchSyncEnabled()
+			|| baselineGate.isWaiting()
+			|| activeCredentials == null
+			|| currentClient == null
+			|| localPlayer == null
+			|| client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+
+		WorldPoint worldPoint = localPlayer.getWorldLocation();
+		Instant observedAt = Instant.now();
+		List<FarmingPatchObservation> patches = new ArrayList<>();
+		for (FarmingPatchLocation location : FarmingPatchLocation.forWorldPoint(worldPoint))
+		{
+			farmingPatchReducer.observe(
+				location,
+				client.getVarbitValue(location.getVarbitId()),
+				observedAt)
+				.ifPresent(patches::add);
+		}
+		if (patches.isEmpty())
+		{
+			return;
+		}
+		FarmingPatchSnapshot snapshot = new FarmingPatchSnapshot(observedAt, patches);
+		if (currentClient.publish(snapshot))
+		{
+			LOG.debug("Captured {} semantic farming patch observations", patches.size());
+		}
+	}
+
+	private void connectBirdHouseTransport()
+	{
+		PairingClient.Credentials credentials = activeCredentials;
+		UUID sessionId = syncSessionId;
+		if (credentials == null || sessionId == null)
+		{
+			return;
+		}
+		try
+		{
+			connectBirdHouseTransport(credentials, SyncContext.capture(client, sessionId));
+		}
+		catch (RuntimeException exception)
+		{
+			handleBirdHouseFailure(credentials, SemanticSnapshotClient.Failure.REJECTED_SNAPSHOT);
+		}
+	}
+
+	private void connectBirdHouseTransport(
+		PairingClient.Credentials credentials,
+		SyncContext context)
+	{
+		SemanticSnapshotClient<BirdHouseSnapshot> currentClient = birdHouseClient;
+		if (!config.birdHouseSyncEnabled()
+			|| currentClient == null
+			|| activeCredentials == null
+			|| !activeCredentials.sameConnection(credentials))
+		{
+			return;
+		}
+		currentClient.connect(credentials, context, new SemanticSnapshotClient.Listener()
+		{
+			@Override
+			public void onAccepted(Instant serverTime)
+			{
+				RuneGlassPanel currentPanel = panel;
+				if (currentPanel != null)
+				{
+					currentPanel.showSynced(serverTime);
+				}
+			}
+
+			@Override
+			public void onRetryScheduled()
+			{
+				LOG.debug("Bird house sync retry scheduled");
+			}
+
+			@Override
+			public void onFailure(SemanticSnapshotClient.Failure failure)
+			{
+				clientThread.invokeLater(() -> handleBirdHouseFailure(credentials, failure));
+			}
+		});
+	}
+
+	private void handleBirdHouseFailure(
+		PairingClient.Credentials credentials,
+		SemanticSnapshotClient.Failure failure)
+	{
+		if (activeCredentials == null || !activeCredentials.sameConnection(credentials))
+		{
+			return;
+		}
+		if (failure == SemanticSnapshotClient.Failure.INVALID_CONNECTION)
+		{
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.INVALID_CONNECTION);
+			return;
+		}
+		if (failure == SemanticSnapshotClient.Failure.BINDING_MISMATCH)
+		{
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.BINDING_MISMATCH);
+			return;
+		}
+		if (birdHouseClient != null)
+		{
+			birdHouseClient.discard();
+		}
+		RuneGlassPanel currentPanel = panel;
+		if (currentPanel != null)
+		{
+			if (failure == SemanticSnapshotClient.Failure.UNSUPPORTED_PROFILE)
+			{
+				currentPanel.showSnapshotFailure(SnapshotClient.Failure.UNSUPPORTED_PROFILE);
+			}
+			else
+			{
+				currentPanel.showBirdHousePaused();
+			}
+		}
+	}
+
+	private void connectFarmingPatchTransport()
+	{
+		PairingClient.Credentials credentials = activeCredentials;
+		UUID sessionId = syncSessionId;
+		if (credentials == null || sessionId == null)
+		{
+			return;
+		}
+		try
+		{
+			connectFarmingPatchTransport(credentials, SyncContext.capture(client, sessionId));
+		}
+		catch (RuntimeException exception)
+		{
+			handleFarmingPatchFailure(
+				credentials,
+				SemanticSnapshotClient.Failure.REJECTED_SNAPSHOT);
+		}
+	}
+
+	private void connectFarmingPatchTransport(
+		PairingClient.Credentials credentials,
+		SyncContext context)
+	{
+		SemanticSnapshotClient<FarmingPatchSnapshot> currentClient = farmingPatchClient;
+		if (!config.farmingPatchSyncEnabled()
+			|| currentClient == null
+			|| activeCredentials == null
+			|| !activeCredentials.sameConnection(credentials))
+		{
+			return;
+		}
+		currentClient.connect(credentials, context, new SemanticSnapshotClient.Listener()
+		{
+			@Override
+			public void onAccepted(Instant serverTime)
+			{
+				RuneGlassPanel currentPanel = panel;
+				if (currentPanel != null)
+				{
+					currentPanel.showSynced(serverTime);
+				}
+			}
+
+			@Override
+			public void onRetryScheduled()
+			{
+				LOG.debug("Farming patch sync retry scheduled");
+			}
+
+			@Override
+			public void onFailure(SemanticSnapshotClient.Failure failure)
+			{
+				clientThread.invokeLater(() -> handleFarmingPatchFailure(credentials, failure));
+			}
+		});
+	}
+
+	private void handleFarmingPatchFailure(
+		PairingClient.Credentials credentials,
+		SemanticSnapshotClient.Failure failure)
+	{
+		if (activeCredentials == null || !activeCredentials.sameConnection(credentials))
+		{
+			return;
+		}
+		if (failure == SemanticSnapshotClient.Failure.INVALID_CONNECTION)
+		{
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.INVALID_CONNECTION);
+			return;
+		}
+		if (failure == SemanticSnapshotClient.Failure.BINDING_MISMATCH)
+		{
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.BINDING_MISMATCH);
+			return;
+		}
+		if (farmingPatchClient != null)
+		{
+			farmingPatchClient.discard();
+		}
+		RuneGlassPanel currentPanel = panel;
+		if (currentPanel != null)
+		{
+			if (failure == SemanticSnapshotClient.Failure.UNSUPPORTED_PROFILE)
+			{
+				currentPanel.showSnapshotFailure(SnapshotClient.Failure.UNSUPPORTED_PROFILE);
+			}
+			else
+			{
+				currentPanel.showFarmingPatchPaused();
+			}
+		}
+	}
+
 	private void finishSession(SnapshotReason reason)
 	{
 		Optional<SkillsSnapshot> finalSnapshot = session.stop(Instant.now(), reason);
@@ -302,6 +669,16 @@ public class RuneGlassPlugin extends Plugin
 			snapshotClient.finishSession();
 		}
 		baselineGate.cancel();
+		birdHouseReducer.reset();
+		farmingPatchReducer.reset();
+		if (birdHouseClient != null)
+		{
+			birdHouseClient.discard();
+		}
+		if (farmingPatchClient != null)
+		{
+			farmingPatchClient.discard();
+		}
 		syncSessionId = null;
 		latestSnapshot = null;
 	}
@@ -350,6 +727,8 @@ public class RuneGlassPlugin extends Plugin
 		}
 
 		captureCurrentClientState();
+		captureBirdHouses();
+		captureFarmingPatch();
 		session.manualSync(Instant.now()).ifPresent(this::publishManualLocally);
 	}
 
@@ -423,6 +802,16 @@ public class RuneGlassPlugin extends Plugin
 		{
 			snapshotClient.discard();
 		}
+		if (birdHouseClient != null)
+		{
+			birdHouseClient.discard();
+		}
+		if (farmingPatchClient != null)
+		{
+			farmingPatchClient.discard();
+		}
+		birdHouseReducer.reset();
+		farmingPatchReducer.reset();
 		clearStoredConnection();
 		refreshPairingPanel();
 	}
@@ -459,6 +848,8 @@ public class RuneGlassPlugin extends Plugin
 		Path queueDirectory = RuneLite.RUNELITE_DIR.toPath()
 			.resolve("runeglass")
 			.resolve(credentials.getConnectionId());
+		connectBirdHouseTransport(credentials, context);
+		connectFarmingPatchTransport(credentials, context);
 		try
 		{
 			executor.execute(() ->
@@ -605,6 +996,16 @@ public class RuneGlassPlugin extends Plugin
 		{
 			snapshotClient.discard();
 		}
+		if (birdHouseClient != null)
+		{
+			birdHouseClient.discard();
+		}
+		if (farmingPatchClient != null)
+		{
+			farmingPatchClient.discard();
+		}
+		birdHouseReducer.reset();
+		farmingPatchReducer.reset();
 		clearStoredConnection();
 		RuneGlassPanel currentPanel = panel;
 		if (currentPanel != null)
