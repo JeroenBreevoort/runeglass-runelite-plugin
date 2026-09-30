@@ -311,6 +311,9 @@ final class RuneGlassPanel extends PluginPanel
 		String detail;
 		switch (failure)
 		{
+			case CONNECTION_LIMIT:
+				detail = "The RuneLite connection limit has been reached. Open RuneGlass Settings → RuneLite Sync, disconnect an unused client, then generate a new code. If this continues, contact RuneGlass support.";
+				break;
 			case AUTHORIZATION_DENIED:
 				detail = "RuneGlass denied this pairing request. Generate a new code to try again.";
 				break;

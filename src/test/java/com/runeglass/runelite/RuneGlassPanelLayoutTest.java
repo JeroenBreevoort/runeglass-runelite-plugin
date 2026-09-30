@@ -34,6 +34,7 @@ public class RuneGlassPanelLayoutTest
 			states.add(() -> panel.showUploading(8));
 			states.add(() -> panel.showSynced(Instant.parse("2026-08-24T14:15:00Z")));
 			states.add(panel::showRetrying);
+			states.add(() -> panel.showFailure(PairingClient.Failure.CONNECTION_LIMIT));
 			states.add(() -> panel.showSnapshotFailure(
 				SnapshotClient.Failure.BINDING_MISMATCH));
 
@@ -43,6 +44,23 @@ public class RuneGlassPanelLayoutTest
 				layoutTree(panel);
 				assertReadable(panel);
 			}
+		});
+	}
+
+	@Test
+	public void connectionLimitExplainsHowToRecover() throws Exception
+	{
+		SwingUtilities.invokeAndWait(() ->
+		{
+			RuneGlassPanel panel = new RuneGlassPanel(() -> { }, () -> { }, () -> { });
+			panel.showFailure(PairingClient.Failure.CONNECTION_LIMIT);
+			String detail = descendants(panel, JTextArea.class).stream()
+				.map(JTextArea::getText)
+				.reduce("", (left, right) -> left + " " + right);
+			assertTrue(detail.contains("connection limit"));
+			assertTrue(detail.contains("disconnect an unused client"));
+			assertTrue(detail.contains("generate a new code"));
+			assertFalse(detail.contains("Check your connection"));
 		});
 	}
 

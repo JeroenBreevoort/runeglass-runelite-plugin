@@ -56,6 +56,7 @@ final class PairingClient
 	enum Failure
 	{
 		AUTHORIZATION_DENIED,
+		CONNECTION_LIMIT,
 		EXPIRED,
 		PROTOCOL_ERROR,
 		TEMPORARILY_UNAVAILABLE
@@ -471,6 +472,10 @@ final class PairingClient
 		try
 		{
 			JsonObject body = ProtocolJson.readObject(response, MAX_RESPONSE_CHARACTERS);
+			if (response.code() == 409 && isError(body, "connection_limit"))
+			{
+				return Failure.CONNECTION_LIMIT;
+			}
 			if (isError(body, "authorization_denied"))
 			{
 				return Failure.AUTHORIZATION_DENIED;

@@ -216,6 +216,16 @@ public class PairingClientTest
 	}
 
 	@Test
+	public void reportsConnectionLimitInsteadOfNetworkFailure() throws Exception
+	{
+		assertTerminalPairingFailure(409, "connection_limit", PairingClient.Failure.CONNECTION_LIMIT);
+		assertEquals(2, server.getRequestCount());
+		assertEquals("/runelite/v1/pairing/start", server.takeRequest().getPath());
+		assertEquals("/runelite/v1/pairing/token", server.takeRequest().getPath());
+		assertNull(server.takeRequest(1_200, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
 	public void reportsDeniedAndExpiredPairingAsTerminalStates() throws Exception
 	{
 		assertTerminalPairingFailure(

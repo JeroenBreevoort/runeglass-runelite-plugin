@@ -8,7 +8,7 @@ import net.runelite.client.config.ConfigItem;
 public interface RuneGlassConfig extends Config
 {
 	String GROUP = "runeglass-sync";
-	String THIRD_PARTY_WARNING = "This plugin sends your RuneScape character name, account/profile type, skill levels, experience values, opted-in timer states and estimated ready times, plugin/client versions, and IP address to RuneGlass, a third-party service not controlled or verified by RuneLite developers.";
+	String THIRD_PARTY_WARNING = "This plugin sends your RuneScape character name, account/profile type, skill levels, experience values, opted-in timer states and estimated ready times, opted-in equipment identifiers, body colours, gender presentation, character model geometry and render attributes (including texture identifiers), plugin/client versions, and IP address to RuneGlass, a third-party service not controlled or verified by RuneLite developers.";
 
 	@ConfigItem(
 		keyName = "syncEnabled",
@@ -41,6 +41,18 @@ public interface RuneGlassConfig extends Config
 		position = 2
 	)
 	default boolean farmingPatchSyncEnabled()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "appearanceSyncEnabled",
+		name = "Sync character appearance",
+		description = "Opt in to sending the current character's equipped item identifiers, body colours, gender presentation, low-poly model geometry and render attributes (including texture identifiers). No other players, animations, screenshots or texture assets are sent. Turning this off pauses uploads; delete stored data in RuneGlass settings.",
+		warning = THIRD_PARTY_WARNING,
+		position = 3
+	)
+	default boolean appearanceSyncEnabled()
 	{
 		return false;
 	}

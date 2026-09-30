@@ -10,6 +10,7 @@ import java.math.BigInteger;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -18,10 +19,13 @@ import javax.inject.Inject;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Player;
+import net.runelite.api.PlayerComposition;
+import net.runelite.api.Model;
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.PlayerChanged;
 import net.runelite.api.events.StatChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.callback.ClientThread;
@@ -77,6 +81,7 @@ public class RuneGlassPlugin extends Plugin
 	private SnapshotClient snapshotClient;
 	private SemanticSnapshotClient<BirdHouseSnapshot> birdHouseClient;
 	private SemanticSnapshotClient<FarmingPatchSnapshot> farmingPatchClient;
+	private SemanticSnapshotClient<AppearanceSnapshot> appearanceClient;
 	private ConnectionStateStore connectionStateStore;
 	private RuneGlassPanel panel;
 	private NavigationButton navigationButton;
@@ -84,6 +89,12 @@ public class RuneGlassPlugin extends Plugin
 	private volatile SkillsSnapshot latestSnapshot;
 	private PairingClient.Credentials activeCredentials;
 	private String activeProfileKey;
+	private boolean appearanceDirty = true;
+	private int pendingAppearanceCompositionHash = Integer.MIN_VALUE;
+	private int stableAppearanceTicks;
+	private volatile boolean appearanceEncoding;
+	private String lastAppearanceModelHash;
+	private long appearanceGeneration;
 
 	@Override
 	protected void startUp()
@@ -114,6 +125,12 @@ public class RuneGlassPlugin extends Plugin
 				snapshot.getObservedAt(),
 				"patches",
 				snapshot.getPatches()));
+		appearanceClient = SemanticSnapshotClient.create(
+			httpClient,
+			gson,
+			executor,
+			"runelite/v1/appearance",
+			AppearanceSnapshotPayload::create);
 		panel = new RuneGlassPanel(
 			() -> clientThread.invokeLater(this::startPairing),
 			() -> clientThread.invokeLater(this::stopPairing),
@@ -154,6 +171,10 @@ public class RuneGlassPlugin extends Plugin
 		{
 			farmingPatchClient.discard();
 		}
+		if (appearanceClient != null)
+		{
+			appearanceClient.discard();
+		}
 		birdHouseReducer.reset();
 		farmingPatchReducer.reset();
 		if (navigationButton != null)
@@ -166,11 +187,13 @@ public class RuneGlassPlugin extends Plugin
 		snapshotClient = null;
 		birdHouseClient = null;
 		farmingPatchClient = null;
+		appearanceClient = null;
 		connectionStateStore = null;
 		syncSessionId = null;
 		latestSnapshot = null;
 		activeCredentials = null;
 		activeProfileKey = null;
+		resetAppearanceCapture();
 		LOG.debug("RuneGlass stopped");
 	}
 
@@ -236,6 +259,18 @@ public class RuneGlassPlugin extends Plugin
 		session.poll(Instant.now()).ifPresent(this::publishLocally);
 		captureBirdHouses();
 		captureFarmingPatch();
+		captureAppearanceWhenStable();
+	}
+
+	@Subscribe
+	public void onPlayerChanged(PlayerChanged event)
+	{
+		if (event.getPlayer() == client.getLocalPlayer())
+		{
+			appearanceGeneration++;
+			appearanceDirty = true;
+			stableAppearanceTicks = 0;
+		}
 	}
 
 	@Subscribe
@@ -283,6 +318,22 @@ public class RuneGlassPlugin extends Plugin
 			}
 			return;
 		}
+		if ("appearanceSyncEnabled".equals(key))
+		{
+			resetAppearanceCapture();
+			if (appearanceClient != null)
+			{
+				appearanceClient.discard();
+			}
+			if (config.syncEnabled()
+				&& config.appearanceSyncEnabled()
+				&& client.getGameState() == GameState.LOGGED_IN)
+			{
+				connectAppearanceTransport();
+				appearanceDirty = true;
+			}
+			return;
+		}
 		if (!"syncEnabled".equals(key))
 		{
 			return;
@@ -302,8 +353,13 @@ public class RuneGlassPlugin extends Plugin
 			{
 				farmingPatchClient.discard();
 			}
+			if (appearanceClient != null)
+			{
+				appearanceClient.discard();
+			}
 			birdHouseReducer.reset();
 			farmingPatchReducer.reset();
+			resetAppearanceCapture();
 			clearStoredConnection();
 			syncSessionId = null;
 			latestSnapshot = null;
@@ -330,6 +386,7 @@ public class RuneGlassPlugin extends Plugin
 		baselineGate.arm();
 		birdHouseReducer.reset();
 		farmingPatchReducer.reset();
+		resetAppearanceCapture();
 		syncSessionId = UUID.randomUUID();
 		latestSnapshot = null;
 		activeCredentials = null;
@@ -344,6 +401,10 @@ public class RuneGlassPlugin extends Plugin
 		if (farmingPatchClient != null)
 		{
 			farmingPatchClient.discard();
+		}
+		if (appearanceClient != null)
+		{
+			appearanceClient.discard();
 		}
 		activeProfileKey = configManager.getRSProfileKey();
 		connectionStateStore = null;
@@ -657,6 +718,226 @@ public class RuneGlassPlugin extends Plugin
 		}
 	}
 
+	private void captureAppearanceWhenStable()
+	{
+		Player localPlayer = client.getLocalPlayer();
+		SemanticSnapshotClient<AppearanceSnapshot> currentClient = appearanceClient;
+		if (!appearanceDirty
+			|| appearanceEncoding
+			|| !config.syncEnabled()
+			|| !config.appearanceSyncEnabled()
+			|| baselineGate.isWaiting()
+			|| activeCredentials == null
+			|| currentClient == null
+			|| localPlayer == null
+			|| client.getGameState() != GameState.LOGGED_IN
+			|| localPlayer.getAnimation() != -1
+			|| localPlayer.getPoseAnimation() != localPlayer.getIdlePoseAnimation())
+		{
+			return;
+		}
+
+		PlayerComposition composition = localPlayer.getPlayerComposition();
+		Model model = localPlayer.getModel();
+		if (composition == null || model == null || composition.getTransformedNpcId() != -1)
+		{
+			return;
+		}
+		int compositionHash = 31 * Arrays.hashCode(composition.getEquipmentIds())
+			+ Arrays.hashCode(composition.getColors());
+		compositionHash = 31 * compositionHash + composition.getGender();
+		final int stableCompositionHash = compositionHash;
+		if (stableCompositionHash != pendingAppearanceCompositionHash)
+		{
+			pendingAppearanceCompositionHash = stableCompositionHash;
+			stableAppearanceTicks = 1;
+			return;
+		}
+		stableAppearanceTicks++;
+		if (stableAppearanceTicks < 2)
+		{
+			return;
+		}
+
+		final AppearanceMeshEncoder.CapturedAppearance captured;
+		try
+		{
+			captured = AppearanceMeshEncoder.capture(model, composition);
+		}
+		catch (RuntimeException exception)
+		{
+			LOG.debug("Skipped unsupported character appearance", exception);
+			appearanceDirty = false;
+			return;
+		}
+		final Instant observedAt = Instant.now();
+		final PairingClient.Credentials credentials = activeCredentials;
+		final long generation = appearanceGeneration;
+		appearanceEncoding = true;
+		try
+		{
+			executor.execute(() ->
+			{
+				final AppearanceMeshEncoder.EncodedMesh encoded;
+				try
+				{
+					encoded = captured.encode();
+				}
+				catch (RuntimeException exception)
+				{
+					clientThread.invokeLater(() ->
+					{
+						appearanceEncoding = false;
+						if (generation != appearanceGeneration)
+						{
+							return;
+						}
+						appearanceDirty = false;
+						LOG.debug("Could not encode character appearance", exception);
+					});
+					return;
+				}
+				clientThread.invokeLater(() -> publishAppearance(
+					credentials,
+					generation,
+					stableCompositionHash,
+					observedAt,
+					encoded));
+			});
+		}
+		catch (RuntimeException exception)
+		{
+			appearanceEncoding = false;
+			LOG.debug("Could not schedule character appearance encoding", exception);
+		}
+	}
+
+	private void publishAppearance(
+		PairingClient.Credentials expectedCredentials,
+		long expectedGeneration,
+		int compositionHash,
+		Instant observedAt,
+		AppearanceMeshEncoder.EncodedMesh encoded)
+	{
+		appearanceEncoding = false;
+		if (expectedGeneration != appearanceGeneration
+			|| !config.syncEnabled()
+			|| !config.appearanceSyncEnabled()
+			|| activeCredentials == null
+			|| !activeCredentials.sameConnection(expectedCredentials)
+			|| appearanceClient == null)
+		{
+			return;
+		}
+		if (encoded.getModelHash().equals(lastAppearanceModelHash))
+		{
+			appearanceDirty = false;
+			return;
+		}
+		if (appearanceClient.publish(new AppearanceSnapshot(observedAt, encoded)))
+		{
+			lastAppearanceModelHash = encoded.getModelHash();
+			pendingAppearanceCompositionHash = compositionHash;
+			appearanceDirty = false;
+			LOG.debug(
+				"Captured character appearance with {} vertices and {} faces",
+				encoded.getVertexCount(),
+				encoded.getFaceCount());
+		}
+	}
+
+	private void connectAppearanceTransport()
+	{
+		PairingClient.Credentials credentials = activeCredentials;
+		UUID sessionId = syncSessionId;
+		if (credentials == null || sessionId == null)
+		{
+			return;
+		}
+		try
+		{
+			connectAppearanceTransport(credentials, SyncContext.capture(client, sessionId));
+		}
+		catch (RuntimeException exception)
+		{
+			handleAppearanceFailure(credentials, SemanticSnapshotClient.Failure.REJECTED_SNAPSHOT);
+		}
+	}
+
+	private void connectAppearanceTransport(
+		PairingClient.Credentials credentials,
+		SyncContext context)
+	{
+		SemanticSnapshotClient<AppearanceSnapshot> currentClient = appearanceClient;
+		if (!config.appearanceSyncEnabled()
+			|| currentClient == null
+			|| activeCredentials == null
+			|| !activeCredentials.sameConnection(credentials))
+		{
+			return;
+		}
+		currentClient.connect(credentials, context, new SemanticSnapshotClient.Listener()
+		{
+			@Override
+			public void onAccepted(Instant serverTime)
+			{
+				RuneGlassPanel currentPanel = panel;
+				if (currentPanel != null)
+				{
+					currentPanel.showSynced(serverTime);
+				}
+			}
+
+			@Override
+			public void onRetryScheduled()
+			{
+				LOG.debug("Character appearance retry scheduled");
+			}
+
+			@Override
+			public void onFailure(SemanticSnapshotClient.Failure failure)
+			{
+				clientThread.invokeLater(() -> handleAppearanceFailure(credentials, failure));
+			}
+		});
+	}
+
+	private void handleAppearanceFailure(
+		PairingClient.Credentials credentials,
+		SemanticSnapshotClient.Failure failure)
+	{
+		if (activeCredentials == null || !activeCredentials.sameConnection(credentials))
+		{
+			return;
+		}
+		if (failure == SemanticSnapshotClient.Failure.INVALID_CONNECTION)
+		{
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.INVALID_CONNECTION);
+			return;
+		}
+		if (failure == SemanticSnapshotClient.Failure.BINDING_MISMATCH)
+		{
+			handleSnapshotFailure(credentials, SnapshotClient.Failure.BINDING_MISMATCH);
+			return;
+		}
+		if (appearanceClient != null)
+		{
+			appearanceClient.discard();
+		}
+		appearanceDirty = true;
+		LOG.debug("Character appearance sync paused: {}", failure);
+	}
+
+	private void resetAppearanceCapture()
+	{
+		appearanceGeneration++;
+		appearanceDirty = true;
+		pendingAppearanceCompositionHash = Integer.MIN_VALUE;
+		stableAppearanceTicks = 0;
+		appearanceEncoding = false;
+		lastAppearanceModelHash = null;
+	}
+
 	private void finishSession(SnapshotReason reason)
 	{
 		Optional<SkillsSnapshot> finalSnapshot = session.stop(Instant.now(), reason);
@@ -679,6 +960,11 @@ public class RuneGlassPlugin extends Plugin
 		{
 			farmingPatchClient.discard();
 		}
+		if (appearanceClient != null)
+		{
+			appearanceClient.discard();
+		}
+		resetAppearanceCapture();
 		syncSessionId = null;
 		latestSnapshot = null;
 	}
@@ -729,6 +1015,8 @@ public class RuneGlassPlugin extends Plugin
 		captureCurrentClientState();
 		captureBirdHouses();
 		captureFarmingPatch();
+		appearanceDirty = true;
+		captureAppearanceWhenStable();
 		session.manualSync(Instant.now()).ifPresent(this::publishManualLocally);
 	}
 
@@ -810,8 +1098,13 @@ public class RuneGlassPlugin extends Plugin
 		{
 			farmingPatchClient.discard();
 		}
+		if (appearanceClient != null)
+		{
+			appearanceClient.discard();
+		}
 		birdHouseReducer.reset();
 		farmingPatchReducer.reset();
+		resetAppearanceCapture();
 		clearStoredConnection();
 		refreshPairingPanel();
 	}
@@ -850,6 +1143,7 @@ public class RuneGlassPlugin extends Plugin
 			.resolve(credentials.getConnectionId());
 		connectBirdHouseTransport(credentials, context);
 		connectFarmingPatchTransport(credentials, context);
+		connectAppearanceTransport(credentials, context);
 		try
 		{
 			executor.execute(() ->
@@ -1004,8 +1298,13 @@ public class RuneGlassPlugin extends Plugin
 		{
 			farmingPatchClient.discard();
 		}
+		if (appearanceClient != null)
+		{
+			appearanceClient.discard();
+		}
 		birdHouseReducer.reset();
 		farmingPatchReducer.reset();
+		resetAppearanceCapture();
 		clearStoredConnection();
 		RuneGlassPanel currentPanel = panel;
 		if (currentPanel != null)

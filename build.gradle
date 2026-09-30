@@ -26,7 +26,7 @@ dependencies {
 }
 
 group = 'com.runeglass'
-version = '1.1.0'
+version = '1.2.0'
 
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
@@ -48,6 +48,66 @@ tasks.register('run', JavaExec) {
 
 	jvmArgs '-ea'
 	args '--developer-mode', '--debug'
+}
+
+// Development networking is compiled separately; the review/release sources
+// and their fixed production destination are never modified by this task.
+def developmentSources = layout.buildDirectory.dir('generated/development-java')
+tasks.register('prepareDevelopmentSources', Sync) {
+	from('src/main/java')
+	from('src/test/java') {
+		include '**/RuneGlassPluginTestClient.java'
+	}
+	into developmentSources
+	filter { line ->
+		line.replace('https://fast-duck-448.eu-west-1.convex.site/',
+			'https://small-cassowary-898.eu-west-1.convex.site/')
+			.replace('.resolve("runeglass")', '.resolve("runeglass-development")')
+	}
+}
+
+sourceSets {
+	development {
+		java.srcDir developmentSources
+		compileClasspath = sourceSets.test.compileClasspath
+		runtimeClasspath = output + configurations.testRuntimeClasspath
+	}
+}
+tasks.named('compileDevelopmentJava') {
+	dependsOn 'prepareDevelopmentSources'
+}
+tasks.register('verifyDevelopmentIsolation') {
+	dependsOn 'developmentClasses', 'classes'
+	doLast {
+		['PairingClient', 'SnapshotClient', 'SemanticSnapshotClient'].each { name ->
+			def classPath = "com/runeglass/runelite/${name}.class"
+			def productionClass = new File(sourceSets.main.output.classesDirs.singleFile, classPath).getText('ISO-8859-1')
+			def developmentClass = new File(sourceSets.development.output.classesDirs.singleFile, classPath).getText('ISO-8859-1')
+			assert productionClass.contains('https://fast-duck-448.eu-west-1.convex.site/')
+			assert !productionClass.contains('small-cassowary-898')
+			assert developmentClass.contains('https://small-cassowary-898.eu-west-1.convex.site/')
+			assert !developmentClass.contains('fast-duck-448')
+		}
+		def pluginPath = 'com/runeglass/runelite/RuneGlassPlugin.class'
+		assert new File(sourceSets.development.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1').contains('runeglass-development')
+		assert !new File(sourceSets.main.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1').contains('runeglass-development')
+	}
+}
+tasks.named('test') {
+	dependsOn 'verifyDevelopmentIsolation'
+}
+tasks.register('runDevelopment', JavaExec) {
+	dependsOn 'verifyDevelopmentIsolation'
+	classpath = sourceSets.development.runtimeClasspath
+	mainClass = pluginMainClass
+	jvmArgs '-ea'
+	if (System.getProperty('os.name').toLowerCase().contains('mac')) {
+		jvmArgs '--add-opens=java.desktop/com.apple.eawt=ALL-UNNAMED'
+	}
+	args '--developer-mode', '--debug'
+	doFirst {
+		logger.lifecycle('RuneGlass DEVELOPMENT: small-cassowary-898; isolated runeglass-development connection storage')
+	}
 }
 
 tasks.register('shadowJar', Jar) {
