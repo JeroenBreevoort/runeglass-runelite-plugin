@@ -10,6 +10,11 @@ user-configurable endpoint.
 
 ## Data and consent
 
+The main sync toggle shows the data-sharing warning. Bird house timers, farming
+timers, and character appearance each have a separate toggle, all off by default,
+with details in their descriptions and no repeated warning. Turning off the main
+sync toggle stops all sharing.
+
 Sync is disabled by default. After the user pairs RuneLite with an existing
 RuneGlass character and enables sync, the plugin sends:
 

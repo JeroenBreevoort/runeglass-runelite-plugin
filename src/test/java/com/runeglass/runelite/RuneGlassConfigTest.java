@@ -1,5 +1,6 @@
 package com.runeglass.runelite;
 
+import java.lang.reflect.Method;
 import net.runelite.client.config.ConfigItem;
 import org.junit.Test;
 
@@ -20,9 +21,53 @@ public class RuneGlassConfigTest
 		assertFalse(config.birdHouseSyncEnabled());
 		assertFalse(config.farmingPatchSyncEnabled());
 		assertFalse(config.appearanceSyncEnabled());
-		assertEquals(
-			"This plugin sends your RuneScape character name, account/profile type, skill levels, experience values, opted-in timer states and estimated ready times, opted-in equipment identifiers, body colours, gender presentation, character model geometry and render attributes (including texture identifiers), plugin/client versions, and IP address to RuneGlass, a third-party service not controlled or verified by RuneLite developers.",
-			RuneGlassConfig.THIRD_PARTY_WARNING);
+	}
+
+	@Test
+	public void onlyMasterSyncShowsTheSharingWarning() throws Exception
+	{
+		int warningCount = 0;
+		for (Method method : RuneGlassConfig.class.getDeclaredMethods())
+		{
+			ConfigItem item = method.getAnnotation(ConfigItem.class);
+			if (item != null && !item.warning().isEmpty())
+			{
+				assertEquals("syncEnabled", item.keyName());
+				assertEquals(RuneGlassConfig.THIRD_PARTY_WARNING, item.warning());
+				warningCount++;
+			}
+		}
+		assertEquals(1, warningCount);
+
+		String warning = RuneGlassConfig.THIRD_PARTY_WARNING;
+		assertTrue(warning.length() <= 300);
+		for (String line : warning.split("\n"))
+		{
+			assertTrue(line.length() <= 80);
+		}
+		assertTrue(warning.contains("character name/type"));
+		assertTrue(warning.contains("skills/XP"));
+		assertTrue(warning.contains("enabled timers and 3D appearance"));
+		assertTrue(warning.contains("version information and IP address"));
+		assertTrue(warning.contains("RuneGlass, a third-party service"));
+		assertTrue(warning.contains("not controlled or verified by RuneLite developers"));
+
+		String description = RuneGlassConfig.class.getMethod("syncEnabled").getAnnotation(ConfigItem.class).description();
+		assertTrue(description.contains("Enable sharing"));
+		assertTrue(description.contains("Timers and appearance require their separate toggles"));
+	}
+
+	@Test
+	public void timerDescriptionsRetainTheirDataBoundaries() throws Exception
+	{
+		String birdHouses = RuneGlassConfig.class.getMethod("birdHouseSyncEnabled").getAnnotation(ConfigItem.class).description();
+		assertTrue(birdHouses.contains("semantic bird house states observed on Fossil Island"));
+		assertTrue(birdHouses.contains("No raw varps or location history are sent"));
+
+		String farming = RuneGlassConfig.class.getMethod("farmingPatchSyncEnabled").getAnnotation(ConfigItem.class).description();
+		assertTrue(farming.contains("semantic crop and tree states observed at supported farming locations"));
+		assertTrue(farming.contains("Compost bins are excluded"));
+		assertTrue(farming.contains("No raw varbits or location history are sent"));
 	}
 
 	@Test
@@ -37,6 +82,5 @@ public class RuneGlassConfigTest
 		assertTrue(description.contains("render attributes (including texture identifiers)"));
 		assertTrue(description.contains("No other players, animations, screenshots or texture assets are sent"));
 		assertTrue(description.contains("pauses uploads; delete stored data in RuneGlass settings"));
-		assertEquals(RuneGlassConfig.THIRD_PARTY_WARNING, item.warning());
 	}
 }
