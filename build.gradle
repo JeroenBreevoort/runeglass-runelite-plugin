@@ -13,7 +13,7 @@ repositories {
 	mavenCentral()
 }
 
-def runeLiteVersion = '1.12.36'
+def runeLiteVersion = '1.13.1'
 def pluginMainClass = 'com.runeglass.runelite.RuneGlassPluginTestClient'
 
 dependencies {

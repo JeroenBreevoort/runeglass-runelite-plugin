@@ -1,7 +1,7 @@
 # RuneGlass
 
 RuneGlass is an opt-in, read-only RuneLite plugin that syncs the logged-in
-character's skills, XP, separately enabled bird house and farming timers, and
+character's skills, XP, separately enabled quests, bird house and farming timers, and
 an optional private character appearance snapshot
 to the RuneGlass companion app.
 
@@ -11,7 +11,7 @@ user-configurable endpoint.
 ## Data and consent
 
 The main sync toggle shows the data-sharing warning. Bird house timers, farming
-timers, and character appearance each have a separate toggle, all off by default,
+timers, quests, and character appearance each have a separate toggle, all off by default,
 with details in their descriptions and no repeated warning. Turning off the main
 sync toggle stops all sharing.
 
@@ -21,6 +21,8 @@ RuneGlass character and enables sync, the plugin sends:
 - character name, account mode, and profile type;
 - complete skill levels and experience values; and
 - plugin, RuneLite, and game revision metadata; and
+- when separately enabled, current quest states by explicit quest ID and current
+  quest points. No raw varbits or historical completion dates are sent; and
 - when separately enabled, the semantic state and tier of the four bird house
   spaces observed on Fossil Island, with an estimated ready time only when the
   plugin observed the seeded transition; and
@@ -63,6 +65,19 @@ stores one current appearance per character profile; it does not retain model
 history. Pausing appearance uploads does not delete the stored portrait.
 Revoking its connection hides the portrait. Export or delete retained RuneLite
 data in the RuneGlass app settings.
+
+Quest observations use that in-memory retry path too. A stable login baseline
+is followed by dirty, debounced scans at most once per 50 game ticks; unchanged
+semantic bodies are not uploaded. No per-tick quest stream or completion history
+is retained. Pause, logout, profile switch, forget-client and authorization failure
+discard queued quest observations. Pausing retains the last server observation,
+with its timestamp; revoking the connection hides it. The supported RuneLite pin
+is 1.13.1 and quest catalog version 1 contains 213 released IDs.
+
+In the companion app, manual quest declarations and pinned unlock goals are
+separate from observed plugin facts. Deleting RuneLite data clears observed
+quests but preserves manual planner data. Removing the character or deleting the
+RuneGlass account clears both. Character export contains both sources separately.
 
 ## Development
 

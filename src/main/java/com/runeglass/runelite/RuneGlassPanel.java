@@ -223,7 +223,7 @@ final class RuneGlassPanel extends PluginPanel
 		onEdt(() -> update(
 			"Connected · up to date",
 			"SYNCED",
-			"Skills and XP synced at " + EXPIRY_FORMAT.format(serverTime)
+			"Last sync at " + EXPIRY_FORMAT.format(serverTime)
 				+ ". Revoke access at any time in RuneGlass Settings.",
 			"Forget client",
 			true,
@@ -277,6 +277,13 @@ final class RuneGlassPanel extends PluginPanel
 			false,
 			false,
 			false));
+	}
+
+	void showQuestPaused()
+	{
+		onEdt(() -> update("Connected · quest sync paused", "PARTIAL",
+			"Skills and XP remain connected. Toggle Sync quests and quest points off and on to resume quest updates.",
+			"Forget client", true, true, true, true));
 	}
 
 	void showBirdHousePaused()

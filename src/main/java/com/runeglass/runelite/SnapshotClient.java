@@ -256,7 +256,8 @@ final class SnapshotClient
 			finalizingSession = true;
 			nextUploadAt = Instant.EPOCH;
 			cancelScheduledDispatchLocked();
-			if (activeCall == null && inFlight == null && pending.isEmpty())
+			if (activeCall == null && inFlight == null && pending.isEmpty()
+				&& (durableQueue == null || durableQueue.size() == 0))
 			{
 				generation++;
 				resetLocked();

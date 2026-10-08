@@ -21,6 +21,7 @@ public class RuneGlassConfigTest
 		assertFalse(config.birdHouseSyncEnabled());
 		assertFalse(config.farmingPatchSyncEnabled());
 		assertFalse(config.appearanceSyncEnabled());
+		assertFalse(config.questSyncEnabled());
 	}
 
 	@Test
@@ -47,14 +48,16 @@ public class RuneGlassConfigTest
 		}
 		assertTrue(warning.contains("character name/type"));
 		assertTrue(warning.contains("skills/XP"));
-		assertTrue(warning.contains("enabled timers and 3D appearance"));
+		assertTrue(warning.contains("enabled timers, quests"));
+		assertTrue(warning.contains("3D appearance"));
 		assertTrue(warning.contains("version information and IP address"));
-		assertTrue(warning.contains("RuneGlass, a third-party service"));
+		assertTrue(warning.contains("RuneGlass,"));
+		assertTrue(warning.contains("a third-party service"));
 		assertTrue(warning.contains("not controlled or verified by RuneLite developers"));
 
 		String description = RuneGlassConfig.class.getMethod("syncEnabled").getAnnotation(ConfigItem.class).description();
 		assertTrue(description.contains("Enable sharing"));
-		assertTrue(description.contains("Timers and appearance require their separate toggles"));
+		assertTrue(description.contains("Timers, quests and appearance require their separate toggles"));
 	}
 
 	@Test

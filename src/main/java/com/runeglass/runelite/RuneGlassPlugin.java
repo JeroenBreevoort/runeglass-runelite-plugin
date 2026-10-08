@@ -12,7 +12,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
@@ -27,6 +29,7 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.PlayerChanged;
 import net.runelite.api.events.StatChanged;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.eventbus.Subscribe;
@@ -42,7 +45,7 @@ import org.slf4j.LoggerFactory;
 
 @PluginDescriptor(
 	name = "RuneGlass",
-	description = "Synchronizes your current character's skills, XP, and opted-in timers with RuneGlass",
+	description = "Synchronizes your current character's skills, XP, and opted-in timers and quests with RuneGlass",
 	tags = {"mobile", "progress", "skills", "xp", "timers", "sync"}
 )
 public class RuneGlassPlugin extends Plugin
@@ -76,10 +79,12 @@ public class RuneGlassPlugin extends Plugin
 	private final SkillsSyncSession session = new SkillsSyncSession();
 	private final LoginBaselineGate baselineGate = new LoginBaselineGate();
 	private final BirdHouseSnapshotReducer birdHouseReducer = new BirdHouseSnapshotReducer();
+	private final QuestSnapshotReducer questReducer = new QuestSnapshotReducer();
 	private final FarmingPatchSnapshotReducer farmingPatchReducer = new FarmingPatchSnapshotReducer();
 	private PairingClient pairingClient;
 	private SnapshotClient snapshotClient;
 	private SemanticSnapshotClient<BirdHouseSnapshot> birdHouseClient;
+	private SemanticSnapshotClient<QuestSnapshot> questClient;
 	private SemanticSnapshotClient<FarmingPatchSnapshot> farmingPatchClient;
 	private SemanticSnapshotClient<AppearanceSnapshot> appearanceClient;
 	private ConnectionStateStore connectionStateStore;
@@ -101,6 +106,9 @@ public class RuneGlassPlugin extends Plugin
 	{
 		pairingClient = PairingClient.create(httpClient, gson, executor);
 		snapshotClient = SnapshotClient.create(httpClient, gson, executor);
+		questClient = SemanticSnapshotClient.create(httpClient, gson, executor, "runelite/v1/quests",
+			(context, connectionId, snapshot) -> SemanticSnapshotPayload.create(context, connectionId,
+				snapshot.getSnapshotId(), snapshot.getObservedAt(), "progress", snapshot.getProgress()));
 		birdHouseClient = SemanticSnapshotClient.create(
 			httpClient,
 			gson,
@@ -186,6 +194,7 @@ public class RuneGlassPlugin extends Plugin
 		pairingClient = null;
 		snapshotClient = null;
 		birdHouseClient = null;
+		questClient = null;
 		farmingPatchClient = null;
 		appearanceClient = null;
 		connectionStateStore = null;
@@ -249,6 +258,11 @@ public class RuneGlassPlugin extends Plugin
 		{
 			return;
 		}
+		if (needsProfileRestart(configManager.getRSProfileKey()))
+		{
+			finishSession(SnapshotReason.PROFILE_SWITCH);
+			startSession();
+		}
 
 		if (baselineGate.onGameTick())
 		{
@@ -257,9 +271,15 @@ public class RuneGlassPlugin extends Plugin
 		}
 
 		session.poll(Instant.now()).ifPresent(this::publishLocally);
+		captureQuests(false);
 		captureBirdHouses();
 		captureFarmingPatch();
 		captureAppearanceWhenStable();
+	}
+
+	boolean needsProfileRestart(String currentProfileKey)
+	{
+		return !Objects.equals(activeProfileKey, currentProfileKey);
 	}
 
 	@Subscribe
@@ -270,6 +290,15 @@ public class RuneGlassPlugin extends Plugin
 			appearanceGeneration++;
 			appearanceDirty = true;
 			stableAppearanceTicks = 0;
+		}
+	}
+
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		if (config.syncEnabled() && config.questSyncEnabled() && session.isActive())
+		{
+			questReducer.markDirty();
 		}
 	}
 
@@ -286,6 +315,15 @@ public class RuneGlassPlugin extends Plugin
 
 	private void handleConfigChanged(String key)
 	{
+		if ("questSyncEnabled".equals(key))
+		{
+			discardQuestCapture();
+			if (config.syncEnabled() && config.questSyncEnabled() && client.getGameState() == GameState.LOGGED_IN)
+			{
+				connectQuestTransport();
+			}
+			return;
+		}
 		if ("birdHouseSyncEnabled".equals(key))
 		{
 			birdHouseReducer.reset();
@@ -342,6 +380,7 @@ public class RuneGlassPlugin extends Plugin
 		if (!config.syncEnabled())
 		{
 			session.cancel();
+			discardQuestCapture();
 			baselineGate.cancel();
 			pairingClient.cancel();
 			snapshotClient.discard();
@@ -382,6 +421,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void startSession()
 	{
+		discardQuestCapture();
 		session.start();
 		baselineGate.arm();
 		birdHouseReducer.reset();
@@ -493,6 +533,74 @@ public class RuneGlassPlugin extends Plugin
 					LOG.debug("Captured four semantic bird house observations");
 				}
 			});
+	}
+
+	private void discardQuestCapture()
+	{
+		questReducer.reset();
+		if (questClient != null) questClient.discard();
+	}
+
+	private void captureQuests(boolean manual)
+	{
+		SemanticSnapshotClient<QuestSnapshot> currentClient = questClient;
+		if (currentClient == null || !currentClient.isConnected() || !config.syncEnabled() || !config.questSyncEnabled()
+			|| !session.isActive() || baselineGate.isWaiting() || activeCredentials == null
+			|| client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
+			|| (!manual && !questReducer.shouldCapture())) return;
+		Map<Integer, String> states = QuestSnapshotReader.readStates(client);
+		if (states.isEmpty()) { questReducer.markDirty(); return; }
+		try
+		{
+			Instant observedAt = Instant.now();
+			int questPoints = QuestSnapshotReader.readQuestPoints(client);
+			if (manual)
+			{
+				currentClient.publish(questReducer.observeManual(observedAt, questPoints, states));
+			}
+			else
+			{
+				questReducer.observe(observedAt, questPoints, states).ifPresent(currentClient::publish);
+			}
+		}
+		catch (IllegalArgumentException exception)
+		{
+			questReducer.markDirty();
+		}
+	}
+
+	private void connectQuestTransport()
+	{
+		if (activeCredentials == null || syncSessionId == null || baselineGate.isWaiting()) return;
+		try { connectQuestTransport(activeCredentials, SyncContext.capture(client, syncSessionId)); }
+		catch (RuntimeException exception) { discardQuestCapture(); }
+	}
+
+	private void connectQuestTransport(PairingClient.Credentials credentials, SyncContext context)
+	{
+		if (!config.syncEnabled() || !config.questSyncEnabled() || questClient == null
+			|| activeCredentials == null || !activeCredentials.sameConnection(credentials)) return;
+		questReducer.reset();
+		questClient.connect(credentials, context, new SemanticSnapshotClient.Listener()
+		{
+			@Override public void onAccepted(Instant serverTime)
+			{
+				if (panel != null) panel.showSynced(serverTime);
+			}
+			@Override public void onRetryScheduled() { LOG.debug("Quest sync retry scheduled"); }
+			@Override public void onFailure(SemanticSnapshotClient.Failure failure)
+			{
+				clientThread.invokeLater(() ->
+				{
+					if (activeCredentials == null || !activeCredentials.sameConnection(credentials)) return;
+					if (failure == SemanticSnapshotClient.Failure.INVALID_CONNECTION)
+						handleSnapshotFailure(credentials, SnapshotClient.Failure.INVALID_CONNECTION);
+					else if (failure == SemanticSnapshotClient.Failure.BINDING_MISMATCH)
+						handleSnapshotFailure(credentials, SnapshotClient.Failure.BINDING_MISMATCH);
+					else { discardQuestCapture(); if (panel != null) panel.showQuestPaused(); }
+				});
+			}
+		});
 	}
 
 	private void captureFarmingPatch()
@@ -940,6 +1048,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void finishSession(SnapshotReason reason)
 	{
+		discardQuestCapture();
 		Optional<SkillsSnapshot> finalSnapshot = session.stop(Instant.now(), reason);
 		if (finalSnapshot.isPresent())
 		{
@@ -1003,16 +1112,19 @@ public class RuneGlassPlugin extends Plugin
 	{
 		if (!config.syncEnabled()
 			|| !session.isActive()
+			|| baselineGate.isWaiting()
 			|| client.getGameState() != GameState.LOGGED_IN
 			|| activeCredentials == null
 			|| snapshotClient == null
-			|| snapshotClient.isFinishingSession())
+			|| snapshotClient.isFinishingSession()
+			|| needsProfileRestart(configManager.getRSProfileKey()))
 		{
 			refreshPairingPanel();
 			return;
 		}
 
 		captureCurrentClientState();
+		captureQuests(true);
 		captureBirdHouses();
 		captureFarmingPatch();
 		appearanceDirty = true;
@@ -1082,6 +1194,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void stopPairing()
 	{
+		discardQuestCapture();
 		if (pairingClient != null)
 		{
 			pairingClient.cancel();
@@ -1142,6 +1255,7 @@ public class RuneGlassPlugin extends Plugin
 			.resolve("runeglass")
 			.resolve(credentials.getConnectionId());
 		connectBirdHouseTransport(credentials, context);
+		connectQuestTransport(credentials, context);
 		connectFarmingPatchTransport(credentials, context);
 		connectAppearanceTransport(credentials, context);
 		try
@@ -1282,6 +1396,7 @@ public class RuneGlassPlugin extends Plugin
 		{
 			return;
 		}
+		discardQuestCapture();
 		if (pairingClient != null)
 		{
 			pairingClient.cancel();

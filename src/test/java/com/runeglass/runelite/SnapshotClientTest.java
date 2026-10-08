@@ -516,10 +516,25 @@ public class SnapshotClientTest
 		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
 		assertTrue(connect(
 			context(),
-			listener(new CountDownLatch(1), failure)));
+			new SnapshotClient.Listener()
+			{
+				@Override public void onUploading(int recordCount) { }
+				@Override public void onAccepted(Instant serverTime) { }
+				@Override public void onRetryScheduled()
+				{
+					throw new AssertionError("Shutdown flush must not retry");
+				}
+				@Override public void onFailure(SnapshotClient.Failure nextFailure)
+				{
+					failure.set(nextFailure);
+				}
+				@Override public void onNextSequenceChanged(BigInteger nextSequence)
+				{
+					client.closeAfterFlush();
+				}
+			}));
 
 		assertTrue(client.finishSession(snapshot(SnapshotReason.LOGOUT_FLUSH)));
-		client.closeAfterFlush();
 		assertSequenceAndReason(takeRequest(), "1", "logout_flush");
 		assertNull(server.takeRequest(1_500, TimeUnit.MILLISECONDS));
 		assertFalse(client.publish(snapshot()));

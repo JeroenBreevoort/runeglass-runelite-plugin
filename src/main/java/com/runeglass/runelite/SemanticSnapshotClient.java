@@ -136,6 +136,14 @@ final class SemanticSnapshotClient<T>
 		}
 	}
 
+	boolean isConnected()
+	{
+		synchronized (lock)
+		{
+			return credentials != null && context != null && listener != null;
+		}
+	}
+
 	boolean publish(T snapshot)
 	{
 		synchronized (lock)

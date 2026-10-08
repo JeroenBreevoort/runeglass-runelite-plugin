@@ -8,14 +8,14 @@ import net.runelite.client.config.ConfigItem;
 public interface RuneGlassConfig extends Config
 {
 	String GROUP = "runeglass-sync";
-	String THIRD_PARTY_WARNING = "Shares your character name/type, skills/XP, enabled timers and 3D appearance,\n"
-		+ "version information and IP address with RuneGlass, a third-party service\n"
-		+ "not controlled or verified by RuneLite developers.";
+	String THIRD_PARTY_WARNING = "Shares your character name/type, skills/XP, enabled timers, quests,\n"
+		+ "3D appearance, version information and IP address with RuneGlass,\n"
+		+ "a third-party service not controlled or verified by RuneLite developers.";
 
 	@ConfigItem(
 		keyName = "syncEnabled",
 		name = "Enable RuneGlass sync",
-		description = "Enable sharing the current character's name/type and complete skill and XP snapshots with RuneGlass. Timers and appearance require their separate toggles.",
+		description = "Enable sharing the current character's name/type and complete skill and XP snapshots with RuneGlass. Timers, quests and appearance require their separate toggles.",
 		warning = THIRD_PARTY_WARNING
 	)
 	default boolean syncEnabled()
@@ -52,6 +52,17 @@ public interface RuneGlassConfig extends Config
 		position = 3
 	)
 	default boolean appearanceSyncEnabled()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "questSyncEnabled",
+		name = "Sync quests and quest points",
+		description = "Opt in to sending current semantic quest states and quest points for this character. No raw varbits, walkthrough actions or completion history are sent. Turning this off pauses uploads; delete stored RuneLite data in RuneGlass settings. Manual planner declarations are stored separately.",
+		position = 4
+	)
+	default boolean questSyncEnabled()
 	{
 		return false;
 	}
