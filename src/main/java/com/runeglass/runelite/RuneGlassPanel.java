@@ -35,10 +35,13 @@ final class RuneGlassPanel extends PluginPanel
 	private final JLabel statusLabel = new JLabel();
 	private final JLabel codeLabel = new JLabel("—", SwingConstants.CENTER);
 	private final JTextArea detailText = textArea("", 5);
+	private final JTextArea dropStatusText = textArea("Drop sync is off. Enable 50K+ stack and notable reward history separately in plugin configuration.", 10);
 	private final JButton actionButton = new JButton();
 	private final JButton manualButton = new JButton("Sync now");
 
 	private boolean stopAction;
+	private boolean dropCaptureAvailable = true;
+	private String dropStatus = "Drop sync is off. Enable 50K+ stack and notable reward history separately in plugin configuration.";
 
 	RuneGlassPanel(Runnable startPairing, Runnable stopPairing, Runnable manualSync)
 	{
@@ -115,8 +118,27 @@ final class RuneGlassPanel extends PluginPanel
 			}
 		});
 		content.add(actionButton);
+		content.add(Box.createRigidArea(new Dimension(0, 14)));
+		content.add(dropStatusText);
 		add(content, BorderLayout.NORTH);
 		showSyncDisabled();
+	}
+
+	void showDropStatus(String status)
+	{
+		onEdt(() -> { dropStatus = status; updateDropStatus(); });
+	}
+
+	void showDropCaptureAvailable(boolean available)
+	{
+		onEdt(() -> { dropCaptureAvailable = available; updateDropStatus(); });
+	}
+
+	private void updateDropStatus()
+	{
+		dropStatusText.setText((dropCaptureAvailable ? "" : "Enable Loot Tracker to capture new qualifying drops. ") + dropStatus);
+		revalidate();
+		repaint();
 	}
 
 	void showSyncDisabled()

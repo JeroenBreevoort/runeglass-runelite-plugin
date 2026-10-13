@@ -62,13 +62,14 @@ public class PairingClientTest
 	}
 
 	@Test
-	public void pairsThroughPendingStateAndKeepsCredentialInMemory() throws Exception
+	public void pairsThroughRepeatedTemporaryPendingStatesAndKeepsCredentialInMemory() throws Exception
 	{
 		server.enqueue(json(201,
 			"{\"protocolVersion\":1,\"deviceCode\":\"" + DEVICE_CODE
 				+ "\",\"userCode\":\"ABCDE-F2345\","
 				+ "\"verificationUri\":\"" + PairingClient.VERIFICATION_URI + "\","
 				+ "\"expiresInSeconds\":60,\"pollIntervalSeconds\":1}"));
+		server.enqueue(json(202, "{\"protocolVersion\":1,\"error\":\"authorization_pending\"}"));
 		server.enqueue(json(202, "{\"protocolVersion\":1,\"error\":\"authorization_pending\"}"));
 		server.enqueue(json(200,
 			"{\"protocolVersion\":1,\"status\":\"issued\",\"connectionId\":\""
@@ -81,7 +82,7 @@ public class PairingClientTest
 		client.start(listener(codeReceived, connected, failure));
 
 		assertTrue(codeReceived.await(2, TimeUnit.SECONDS));
-		assertTrue(connected.await(4, TimeUnit.SECONDS));
+		assertTrue(connected.await(5, TimeUnit.SECONDS));
 		assertNull(failure.get());
 
 		RecordedRequest start = assertRequest("/runelite/v1/pairing/start");
@@ -91,6 +92,8 @@ public class PairingClientTest
 
 		RecordedRequest pending = assertRequest("/runelite/v1/pairing/token");
 		assertEquals(DEVICE_CODE, parseBody(pending).get("deviceCode").getAsString());
+		RecordedRequest paused = assertRequest("/runelite/v1/pairing/token");
+		assertEquals(DEVICE_CODE, parseBody(paused).get("deviceCode").getAsString());
 		RecordedRequest issued = assertRequest("/runelite/v1/pairing/token");
 		assertEquals(DEVICE_CODE, parseBody(issued).get("deviceCode").getAsString());
 

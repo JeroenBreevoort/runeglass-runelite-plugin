@@ -106,6 +106,26 @@ public class BirdHouseClientTest
 	}
 
 	@Test
+	public void suspensionRetriesWithTheSameCredentialWithoutDisconnecting() throws Exception
+	{
+		server.enqueue(new MockResponse().setResponseCode(503).setHeader("Retry-After", "1")
+			.setBody("{\"protocolVersion\":1,\"error\":\"account_suspended\"}"));
+		server.enqueue(accepted());
+		CountDownLatch accepted = new CountDownLatch(1);
+		AtomicReference<SemanticSnapshotClient.Failure> failure = new AtomicReference<>();
+		client.connect(credentials(), context(), listener(accepted, failure));
+		assertTrue(client.publish(snapshot()));
+		RecordedRequest first = server.takeRequest(3, TimeUnit.SECONDS);
+		RecordedRequest retry = server.takeRequest(3, TimeUnit.SECONDS);
+		assertEquals("Bearer " + RAW_CREDENTIAL, first.getHeader("Authorization"));
+		assertEquals(first.getHeader("Authorization"), retry.getHeader("Authorization"));
+		assertEquals(first.getBody().readUtf8(), retry.getBody().readUtf8());
+		assertTrue(accepted.await(3, TimeUnit.SECONDS));
+		assertTrue(client.isConnected());
+		assertNull(failure.get());
+	}
+
+	@Test
 	public void discardDropsAnUnsentObservation()
 	{
 		client.connect(credentials(), context(), listener(new CountDownLatch(0), new AtomicReference<>()));

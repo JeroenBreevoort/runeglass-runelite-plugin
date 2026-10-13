@@ -34,6 +34,7 @@ public class RuneGlassPanelLayoutTest
 			states.add(() -> panel.showUploading(8));
 			states.add(() -> panel.showSynced(Instant.parse("2026-08-24T14:15:00Z")));
 			states.add(panel::showRetrying);
+			states.add(() -> panel.showDropStatus("Drops waiting to retry. 10000 drop events saved locally, waiting to sync. Some local records need attention and have not been uploaded. Some drops in this session could not be saved."));
 			states.add(() -> panel.showFailure(PairingClient.Failure.CONNECTION_LIMIT));
 			states.add(() -> panel.showSnapshotFailure(
 				SnapshotClient.Failure.BINDING_MISMATCH));
@@ -67,7 +68,7 @@ public class RuneGlassPanelLayoutTest
 	private static void assertReadable(RuneGlassPanel panel)
 	{
 		List<JTextArea> textAreas = descendants(panel, JTextArea.class);
-		assertEquals(2, textAreas.size());
+		assertEquals(3, textAreas.size());
 		for (JTextArea textArea : textAreas)
 		{
 			assertTrue("Text must use the sidebar width", textArea.getWidth() >= 190);

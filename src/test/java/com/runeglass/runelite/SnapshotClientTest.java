@@ -195,6 +195,55 @@ public class SnapshotClientTest
 	}
 
 	@Test
+	public void keepsTheCredentialAndRetriesTheIdenticalBatchWhileAccountIsSuspended() throws Exception
+	{
+		server.enqueue(new MockResponse()
+			.setResponseCode(503)
+			.setHeader("Content-Type", "application/json")
+			.setHeader("Retry-After", "1")
+			.setBody("{\"protocolVersion\":1,\"error\":\"account_suspended\"}"));
+		server.enqueue(accepted());
+		CountDownLatch accepted = new CountDownLatch(1);
+		CountDownLatch retryScheduled = new CountDownLatch(1);
+		AtomicReference<SnapshotClient.Failure> failure = new AtomicReference<>();
+		connect(context(), new SnapshotClient.Listener()
+		{
+			@Override
+			public void onUploading(int recordCount)
+			{
+			}
+
+			@Override
+			public void onAccepted(Instant serverTime)
+			{
+				accepted.countDown();
+			}
+
+			@Override
+			public void onRetryScheduled()
+			{
+				retryScheduled.countDown();
+			}
+
+			@Override
+			public void onFailure(SnapshotClient.Failure nextFailure)
+			{
+				failure.set(nextFailure);
+			}
+		});
+		client.publish(snapshot());
+
+		RecordedRequest first = takeRequest();
+		assertTrue(retryScheduled.await(2, TimeUnit.SECONDS));
+		RecordedRequest retry = takeRequest();
+		assertEquals("Bearer " + RAW_CREDENTIAL, first.getHeader("Authorization"));
+		assertEquals(first.getHeader("Authorization"), retry.getHeader("Authorization"));
+		assertEquals(first.getBody().readUtf8(), retry.getBody().readUtf8());
+		assertTrue(accepted.await(2, TimeUnit.SECONDS));
+		assertNull(failure.get());
+	}
+
+	@Test
 	public void stopsOnBindingMismatchWithoutRetrying() throws Exception
 	{
 		server.enqueue(new MockResponse()

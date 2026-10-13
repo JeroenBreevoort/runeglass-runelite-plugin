@@ -9,13 +9,13 @@ public interface RuneGlassConfig extends Config
 {
 	String GROUP = "runeglass-sync";
 	String THIRD_PARTY_WARNING = "Shares your character name/type, skills/XP, enabled timers, quests,\n"
-		+ "3D appearance, version information and IP address with RuneGlass,\n"
+		+ "3D appearance, enabled drops, version information and IP address with RuneGlass,\n"
 		+ "a third-party service not controlled or verified by RuneLite developers.";
 
 	@ConfigItem(
 		keyName = "syncEnabled",
 		name = "Enable RuneGlass sync",
-		description = "Enable sharing the current character's name/type and complete skill and XP snapshots with RuneGlass. Timers, quests and appearance require their separate toggles.",
+		description = "Enable sharing the current character's name/type and complete skill and XP snapshots with RuneGlass. Timers, quests, appearance and drops require their separate toggles.",
 		warning = THIRD_PARTY_WARNING
 	)
 	default boolean syncEnabled()
@@ -63,6 +63,16 @@ public interface RuneGlassConfig extends Config
 		position = 4
 	)
 	default boolean questSyncEnabled()
+	{
+		return false;
+	}
+	@ConfigItem(
+		keyName = "dropSyncEnabled",
+		name = "Sync drop history",
+		description = "Opt in to sharing supported Loot Tracker events containing an item stack worth at least 50,000 GP at capture or a curated notable reward, including all accompanying items. Shares source, items, quantities, capture time and available value estimates. Loot Tracker must be enabled. No player loot, raw chat or kill counts. History remains until deletion in RuneGlass. Turning this off deletes unsent drops across local profiles.",
+		position = 5
+	)
+	default boolean dropSyncEnabled()
 	{
 		return false;
 	}

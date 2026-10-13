@@ -22,6 +22,7 @@ public class RuneGlassConfigTest
 		assertFalse(config.farmingPatchSyncEnabled());
 		assertFalse(config.appearanceSyncEnabled());
 		assertFalse(config.questSyncEnabled());
+		assertFalse(config.dropSyncEnabled());
 	}
 
 	@Test
@@ -57,7 +58,7 @@ public class RuneGlassConfigTest
 
 		String description = RuneGlassConfig.class.getMethod("syncEnabled").getAnnotation(ConfigItem.class).description();
 		assertTrue(description.contains("Enable sharing"));
-		assertTrue(description.contains("Timers, quests and appearance require their separate toggles"));
+		assertTrue(description.contains("Timers, quests, appearance and drops require their separate toggles"));
 	}
 
 	@Test
@@ -71,6 +72,17 @@ public class RuneGlassConfigTest
 		assertTrue(farming.contains("semantic crop and tree states observed at supported farming locations"));
 		assertTrue(farming.contains("Compost bins are excluded"));
 		assertTrue(farming.contains("No raw varbits or location history are sent"));
+	}
+
+	@Test
+	public void dropConsentDisclosesCapturedStackThresholdAndWholeRewardRetention() throws Exception
+	{
+		String description = RuneGlassConfig.class.getMethod("dropSyncEnabled").getAnnotation(ConfigItem.class).description();
+		assertTrue(description.contains("item stack worth at least 50,000 GP at capture"));
+		assertTrue(description.contains("curated notable reward, including all accompanying items"));
+		assertTrue(description.contains("Loot Tracker must be enabled"));
+		assertTrue(description.contains("History remains until deletion"));
+		assertTrue(description.contains("deletes unsent drops across local profiles"));
 	}
 
 	@Test

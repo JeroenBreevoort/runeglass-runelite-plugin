@@ -15,6 +15,7 @@ repositories {
 
 def runeLiteVersion = '1.13.1'
 def pluginMainClass = 'com.runeglass.runelite.RuneGlassPluginTestClient'
+def developmentMainClass = 'com.runeglass.runelite.RuneGlassDevelopmentClient'
 
 dependencies {
 	compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
@@ -52,12 +53,12 @@ tasks.register('run', JavaExec) {
 
 // Development networking is compiled separately; the review/release sources
 // and their fixed production destination are never modified by this task.
+// Development-only controls live in src/development and are never part of the
+// main/test outputs, the production jar, or the review export.
 def developmentSources = layout.buildDirectory.dir('generated/development-java')
+def developmentOnlySources = file('src/development/java')
 tasks.register('prepareDevelopmentSources', Sync) {
 	from('src/main/java')
-	from('src/test/java') {
-		include '**/RuneGlassPluginTestClient.java'
-	}
 	into developmentSources
 	filter { line ->
 		line.replace('https://fast-duck-448.eu-west-1.convex.site/',
@@ -68,18 +69,33 @@ tasks.register('prepareDevelopmentSources', Sync) {
 
 sourceSets {
 	development {
-		java.srcDir developmentSources
-		compileClasspath = sourceSets.test.compileClasspath
+		java.srcDirs developmentSources, developmentOnlySources
+		compileClasspath = configurations.testCompileClasspath
 		runtimeClasspath = output + configurations.testRuntimeClasspath
+	}
+	developmentTest {
+		compileClasspath = sourceSets.development.output + sourceSets.test.output + configurations.testCompileClasspath
+		runtimeClasspath = output + compileClasspath + configurations.testRuntimeClasspath
 	}
 }
 tasks.named('compileDevelopmentJava') {
 	dependsOn 'prepareDevelopmentSources'
 }
+tasks.register('developmentTest', Test) {
+	description = 'Runs tests for development-only RuneGlass controls.'
+	group = 'verification'
+	testClassesDirs = sourceSets.developmentTest.output.classesDirs
+	classpath = sourceSets.developmentTest.runtimeClasspath
+	useJUnit()
+	testLogging {
+		events 'failed', 'skipped'
+		exceptionFormat 'full'
+	}
+}
 tasks.register('verifyDevelopmentIsolation') {
-	dependsOn 'developmentClasses', 'classes'
+	dependsOn 'developmentClasses', 'classes', 'testClasses', 'jar'
 	doLast {
-		['PairingClient', 'SnapshotClient', 'SemanticSnapshotClient'].each { name ->
+		['PairingClient', 'SnapshotClient', 'SemanticSnapshotClient', 'DropClient'].each { name ->
 			def classPath = "com/runeglass/runelite/${name}.class"
 			def productionClass = new File(sourceSets.main.output.classesDirs.singleFile, classPath).getText('ISO-8859-1')
 			def developmentClass = new File(sourceSets.development.output.classesDirs.singleFile, classPath).getText('ISO-8859-1')
@@ -91,23 +107,43 @@ tasks.register('verifyDevelopmentIsolation') {
 		def pluginPath = 'com/runeglass/runelite/RuneGlassPlugin.class'
 		assert new File(sourceSets.development.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1').contains('runeglass-development')
 		assert !new File(sourceSets.main.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1').contains('runeglass-development')
+
+		def developmentOnly = fileTree(developmentOnlySources).include('**/*.java').files.collect { it.name - '.java' }
+		def productionClasses = files(sourceSets.main.output.classesDirs, sourceSets.test.output.classesDirs).asFileTree.files +
+			zipTree(tasks.named('jar').get().archiveFile).files
+		productionClasses.each { classFile ->
+			def bytes = classFile.getText('ISO-8859-1')
+			developmentOnly.each { name ->
+				assert !classFile.name.startsWith(name) && !bytes.contains("com/runeglass/runelite/${name}") :
+					"Development-only ${name} reached production output ${classFile.name}"
+			}
+		}
+		developmentOnly.each { name ->
+			assert new File(sourceSets.development.output.classesDirs.singleFile, "com/runeglass/runelite/${name}.class").exists()
+		}
 	}
 }
 tasks.named('test') {
-	dependsOn 'verifyDevelopmentIsolation'
+	dependsOn 'verifyDevelopmentIsolation', 'developmentTest'
 }
 tasks.register('runDevelopment', JavaExec) {
 	dependsOn 'verifyDevelopmentIsolation'
 	classpath = sourceSets.development.runtimeClasspath
-	mainClass = pluginMainClass
+	mainClass = developmentMainClass
 	jvmArgs '-ea'
 	if (System.getProperty('os.name').toLowerCase().contains('mac')) {
 		jvmArgs '--add-opens=java.desktop/com.apple.eawt=ALL-UNNAMED'
 	}
 	args '--developer-mode', '--debug'
 	doFirst {
-		logger.lifecycle('RuneGlass DEVELOPMENT: small-cassowary-898; isolated runeglass-development connection storage')
+		logger.lifecycle('RuneGlass DEVELOPMENT: small-cassowary-898; isolated runeglass-development connection storage; DEV drop test controls')
 	}
+}
+tasks.register('previewDropTestPanel', JavaExec) {
+	description = 'Opens the development-only drop test panel with fake outcomes; pass --args="--png <file>" to render offscreen.'
+	dependsOn 'developmentClasses'
+	classpath = sourceSets.development.runtimeClasspath
+	mainClass = 'com.runeglass.runelite.DropTestPreview'
 }
 
 tasks.register('shadowJar', Jar) {

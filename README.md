@@ -2,7 +2,7 @@
 
 RuneGlass is an opt-in, read-only RuneLite plugin that syncs the logged-in
 character's skills, XP, separately enabled quests, bird house and farming timers, and
-an optional private character appearance snapshot
+optional drop history and a private character appearance snapshot
 to the RuneGlass companion app.
 
 The plugin uses a fixed RuneGlass HTTPS destination and never accepts a
@@ -11,7 +11,7 @@ user-configurable endpoint.
 ## Data and consent
 
 The main sync toggle shows the data-sharing warning. Bird house timers, farming
-timers, quests, and character appearance each have a separate toggle, all off by default,
+timers, quests, drop history, and character appearance each have a separate toggle, all off by default,
 with details in their descriptions and no repeated warning. Turning off the main
 sync toggle stops all sharing.
 
@@ -79,6 +79,48 @@ separate from observed plugin facts. Deleting RuneLite data clears observed
 quests but preserves manual planner data. Removing the character or deleting the
 RuneGlass account clears both. Character export contains both sources separately.
 
+## Drop history
+
+Enable **Sync drop history** separately after pairing. Loot Tracker is a required
+runtime prerequisite. On standard profiles, RuneGlass captures NPC and pickpocket
+loot plus six clue tiers, Barrows, Chambers of Xeric, Theatre of Blood and Tombs
+of Amascut. An event is kept only when at least one merged item stack has a
+captured value of **50,000 GP or more**, or matches a curated notable reward for
+that exact source type, source name and observed item ID. Distinct item stacks
+are not added together to meet the threshold. Player loot, unknown/unreviewed
+events and other-plugin injections are excluded. Coverage requires both plugins
+and consent to be active; it does
+not reconstruct past drops or guarantee pet/collection-log coverage.
+
+Each event sends capture time, source, reward-roll count, item IDs/names/quantities
+and available frozen GE estimates. Reward-roll count is not kill count. Coins
+have exact value; missing estimates remain unknown and untradeable rewards remain
+untradeable. Qualifying events include all accompanying items, even low-value,
+unknown-price or untradeable items. Low-only events are not queued or uploaded.
+Raw event metadata is never uploaded. The app's current prices never change capture
+eligibility; later price changes do not add or remove saved history. The app's
+Drops and Favourites views use saved occurrences; a favourite is not a capture
+rule. Existing pending queues and stored history are not rewritten by this policy.
+
+Drops have a separate atomic disk queue: at most 5 MiB or 10,000 events per
+connection, no age expiry, and no silent eviction. A full queue or disk failure
+means new drops can be missed; the panel reports that gap. Uncommitted worker
+captures (at most 256) are not guaranteed to survive a crash. Saved events retain
+their IDs/content across logout/restart and retries. Invalid/rejected files remain
+on disk, visibly flagged, while healthy records can continue.
+
+Turning off drops or master sync cancels requests and deletes pending drop files
+for all local profiles. Forget client and confirmed credential revocation delete
+that connection's pending drops. A binding mismatch pauses and retains pending
+history. A disk deletion failure is visible and blocks uploads. A changed consent
+setting while the plugin is stopped is applied on its next start. Already synced
+history remains in RuneGlass until deliberate RuneLite-data, character or account
+deletion. Export and deletion are available in RuneGlass settings.
+
+Drop uploads require RuneGlass server support. If the server temporarily pauses
+uploads, saved drops remain queued and retry automatically. The plugin panel
+shows whether events are waiting to sync.
+
 ## Development
 
 The plugin requires Java 11.
@@ -88,18 +130,5 @@ The plugin requires Java 11.
 ./gradlew run
 ```
 
-For the RuneGlass **development backend**, run `npm run runelite:dev` from
-the repository root. This compiles a separate development source set with the
-fixed `small-cassowary-898` destination used by the mobile development app.
-The normal `run` task uses production, even though RuneLite developer mode is
-enabled. Never pair a production client with a development app.
 
-Development credentials and queues are isolated under
-`.runelite/runeglass-development`; production remains under `.runelite/runeglass`.
-Each environment needs its own pairing. The development task does not copy
-credentials, modify production sources, or affect the review/release JAR.
-On macOS it includes RuneLite's required Java module opening. A locally available
-JDK 17 may be selected with `JAVA_HOME` (compiled classes still target Java 11).
-
-Only the user may perform in-game validation. Automated tools must not interact
-with RuneScape.
+JDK 17 can also build and run the plugin. Compiled classes target Java 11.

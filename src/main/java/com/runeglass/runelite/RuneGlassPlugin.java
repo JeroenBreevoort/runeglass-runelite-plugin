@@ -34,8 +34,14 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.PluginManager;
+import net.runelite.client.events.PluginChanged;
+import net.runelite.client.plugins.loottracker.LootTrackerPlugin;
+import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.RuneLite;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -45,12 +51,19 @@ import org.slf4j.LoggerFactory;
 
 @PluginDescriptor(
 	name = "RuneGlass",
-	description = "Synchronizes your current character's skills, XP, and opted-in timers and quests with RuneGlass",
+	description = "Synchronizes your current character's skills, XP, and opted-in timers, quests and drops with RuneGlass",
 	tags = {"mobile", "progress", "skills", "xp", "timers", "sync"}
 )
 public class RuneGlassPlugin extends Plugin
 {
 	private static final Logger LOG = LoggerFactory.getLogger(RuneGlassPlugin.class);
+
+	interface DropCaptureObserver
+	{
+		void onLootHandled(DropCaptureResult result);
+
+		void onDropStatus(String status);
+	}
 
 	@Inject
 	private Client client;
@@ -63,6 +76,14 @@ public class RuneGlassPlugin extends Plugin
 
 	@Inject
 	private Gson gson;
+
+	@Inject
+	private ItemManager itemManager;
+
+	@Inject
+	private PluginManager pluginManager;
+
+	private volatile boolean lootTrackerRunning;
 
 	@Inject
 	private ScheduledExecutorService executor;
@@ -88,6 +109,9 @@ public class RuneGlassPlugin extends Plugin
 	private SemanticSnapshotClient<FarmingPatchSnapshot> farmingPatchClient;
 	private SemanticSnapshotClient<AppearanceSnapshot> appearanceClient;
 	private ConnectionStateStore connectionStateStore;
+	private DropClient dropClient;
+	private final DropCapture dropCapture = new DropCapture();
+	private volatile DropCaptureObserver dropCaptureObserver;
 	private RuneGlassPanel panel;
 	private NavigationButton navigationButton;
 	private UUID syncSessionId;
@@ -104,6 +128,8 @@ public class RuneGlassPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		lootTrackerRunning = pluginManager.getPlugins().stream()
+			.anyMatch(plugin -> plugin instanceof LootTrackerPlugin && pluginManager.isPluginActive(plugin));
 		pairingClient = PairingClient.create(httpClient, gson, executor);
 		snapshotClient = SnapshotClient.create(httpClient, gson, executor);
 		questClient = SemanticSnapshotClient.create(httpClient, gson, executor, "runelite/v1/quests",
@@ -143,6 +169,25 @@ public class RuneGlassPlugin extends Plugin
 			() -> clientThread.invokeLater(this::startPairing),
 			() -> clientThread.invokeLater(this::stopPairing),
 			() -> clientThread.invokeLater(this::requestManualSync));
+		panel.showDropCaptureAvailable(lootTrackerRunning);
+		dropClient = DropClient.create(httpClient, gson, executor,
+			RuneLite.RUNELITE_DIR.toPath().resolve("runeglass").resolve("drops-v1"), new DropClient.Listener()
+			{
+				@Override public void onStatus(String status)
+				{
+					RuneGlassPanel currentPanel = panel;
+					if (currentPanel != null) currentPanel.showDropStatus(status);
+					DropCaptureObserver observer = dropCaptureObserver;
+					if (observer != null) observer.onDropStatus(status);
+				}
+				@Override public void onInvalidConnection(PairingClient.Credentials credentials, boolean bindingMismatch)
+				{
+					clientThread.invokeLater(() -> handleSnapshotFailure(credentials, bindingMismatch
+						? SnapshotClient.Failure.BINDING_MISMATCH : SnapshotClient.Failure.INVALID_CONNECTION));
+				}
+			});
+		if (!config.syncEnabled() || !config.dropSyncEnabled()) dropClient.discardAll();
+		else panel.showDropStatus("Drop sync enabled. Log in and pair this profile; Loot Tracker must be enabled.");
 		navigationButton = NavigationButton.builder()
 			.tooltip("RuneGlass Sync")
 			.icon(createNavigationIcon())
@@ -198,6 +243,7 @@ public class RuneGlassPlugin extends Plugin
 		farmingPatchClient = null;
 		appearanceClient = null;
 		connectionStateStore = null;
+		dropClient = null;
 		syncSessionId = null;
 		latestSnapshot = null;
 		activeCredentials = null;
@@ -315,6 +361,15 @@ public class RuneGlassPlugin extends Plugin
 
 	private void handleConfigChanged(String key)
 	{
+		if ("dropSyncEnabled".equals(key))
+		{
+			if (dropClient != null)
+			{
+				if (!config.syncEnabled() || !config.dropSyncEnabled()) dropClient.discardAll();
+				else connectDropTransport();
+			}
+			return;
+		}
 		if ("questSyncEnabled".equals(key))
 		{
 			discardQuestCapture();
@@ -379,6 +434,7 @@ public class RuneGlassPlugin extends Plugin
 
 		if (!config.syncEnabled())
 		{
+			if (dropClient != null) dropClient.discardAll();
 			session.cancel();
 			discardQuestCapture();
 			baselineGate.cancel();
@@ -421,6 +477,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void startSession()
 	{
+		if (dropClient != null) dropClient.pause();
 		discardQuestCapture();
 		session.start();
 		baselineGate.arm();
@@ -1048,6 +1105,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void finishSession(SnapshotReason reason)
 	{
+		if (dropClient != null) dropClient.pause();
 		discardQuestCapture();
 		Optional<SkillsSnapshot> finalSnapshot = session.stop(Instant.now(), reason);
 		if (finalSnapshot.isPresent())
@@ -1194,6 +1252,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void stopPairing()
 	{
+		if (dropClient != null && activeCredentials != null) dropClient.discardConnection(activeCredentials.getConnectionId());
 		discardQuestCapture();
 		if (pairingClient != null)
 		{
@@ -1258,6 +1317,8 @@ public class RuneGlassPlugin extends Plugin
 		connectQuestTransport(credentials, context);
 		connectFarmingPatchTransport(credentials, context);
 		connectAppearanceTransport(credentials, context);
+		if (dropClient != null && config.dropSyncEnabled()
+			&& RuneScapeProfileType.getCurrent(client) == RuneScapeProfileType.STANDARD) dropClient.connect(credentials, context);
 		try
 		{
 			executor.execute(() ->
@@ -1396,6 +1457,11 @@ public class RuneGlassPlugin extends Plugin
 		{
 			return;
 		}
+		if (dropClient != null)
+		{
+			if (failure == SnapshotClient.Failure.INVALID_CONNECTION) dropClient.discardConnection(expectedCredentials.getConnectionId());
+			else dropClient.pause();
+		}
 		discardQuestCapture();
 		if (pairingClient != null)
 		{
@@ -1483,6 +1549,79 @@ public class RuneGlassPlugin extends Plugin
 		else
 		{
 			currentPanel.showReady();
+		}
+	}
+
+	@Subscribe
+	public void onPluginChanged(PluginChanged event)
+	{
+		if (!(event.getPlugin() instanceof LootTrackerPlugin)) return;
+		lootTrackerRunning = event.isLoaded();
+		RuneGlassPanel currentPanel = panel;
+		if (currentPanel != null) currentPanel.showDropCaptureAvailable(lootTrackerRunning);
+	}
+
+	@Subscribe
+	public void onLootReceived(LootReceived event)
+	{
+		DropCaptureResult result = handleLoot(event);
+		DropCaptureObserver observer = dropCaptureObserver;
+		if (observer != null) observer.onLootHandled(result);
+	}
+
+	DropCaptureResult handleLoot(LootReceived event)
+	{
+		DropClient currentClient = dropClient;
+		DropCaptureResult.Reason blocked = dropCaptureBlocker(currentClient);
+		if (blocked != null) return DropCaptureResult.blocked(blocked);
+		try
+		{
+			DropCaptureResult result = dropCapture.capture(event, itemManager, syncSessionId, Instant.now());
+			return result.event().map(drop -> result.submitted(currentClient.publish(drop))).orElse(result);
+		}
+		catch (RuntimeException exception)
+		{
+			currentClient.captureFailed();
+			return DropCaptureResult.invalid();
+		}
+	}
+
+	private DropCaptureResult.Reason dropCaptureBlocker(DropClient currentClient)
+	{
+		if (currentClient == null) return DropCaptureResult.Reason.PLUGIN_STOPPED;
+		if (!config.syncEnabled()) return DropCaptureResult.Reason.SYNC_OFF;
+		if (!config.dropSyncEnabled()) return DropCaptureResult.Reason.DROP_SYNC_OFF;
+		if (!lootTrackerRunning) return DropCaptureResult.Reason.LOOT_TRACKER_OFF;
+		if (client.getGameState() != GameState.LOGGED_IN) return DropCaptureResult.Reason.LOGGED_OUT;
+		if (!session.isActive() || syncSessionId == null) return DropCaptureResult.Reason.SESSION_INACTIVE;
+		if (baselineGate.isWaiting()) return DropCaptureResult.Reason.BASELINE_PENDING;
+		if (needsProfileRestart(configManager.getRSProfileKey())) return DropCaptureResult.Reason.PROFILE_CHANGED;
+		if (activeCredentials == null) return DropCaptureResult.Reason.NOT_PAIRED;
+		if (RuneScapeProfileType.getCurrent(client) != RuneScapeProfileType.STANDARD)
+		{
+			return DropCaptureResult.Reason.UNSUPPORTED_PROFILE;
+		}
+		if (!currentClient.isConnected()) return DropCaptureResult.Reason.TRANSPORT_NOT_READY;
+		return null;
+	}
+
+	void setDropCaptureObserver(DropCaptureObserver observer)
+	{
+		dropCaptureObserver = observer;
+	}
+
+	private void connectDropTransport()
+	{
+		if (dropClient == null || !config.syncEnabled() || !config.dropSyncEnabled()
+			|| activeCredentials == null || syncSessionId == null || baselineGate.isWaiting()
+			|| RuneScapeProfileType.getCurrent(client) != RuneScapeProfileType.STANDARD
+			|| client.getGameState() != GameState.LOGGED_IN
+			|| needsProfileRestart(configManager.getRSProfileKey())) return;
+		try { dropClient.connect(activeCredentials, SyncContext.capture(client, syncSessionId)); }
+		catch (RuntimeException exception)
+		{
+			dropClient.pause();
+			if (panel != null) panel.showDropStatus("Drops paused: this profile could not be validated.");
 		}
 	}
 

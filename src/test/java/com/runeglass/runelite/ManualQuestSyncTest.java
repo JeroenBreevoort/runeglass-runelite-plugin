@@ -315,6 +315,27 @@ public class ManualQuestSyncTest
 		assertEquals(3, server.getRequestCount());
 	}
 
+	@Test
+	public void suspendedQuestUploadKeepsTheConnectionUntilTheAccountIsRestored() throws Exception
+	{
+		server.enqueue(new MockResponse().setResponseCode(503).setHeader("Retry-After", "1")
+			.setBody("{\"protocolVersion\":1,\"error\":\"account_suspended\"}"));
+		server.enqueue(acceptedResponse());
+		Object credentials = getField(plugin, "activeCredentials");
+		manualSync();
+		RecordedRequest first = takeRequest();
+		assertNotNull(retries.poll(3, TimeUnit.SECONDS));
+		assertTrue(transport.isConnected());
+		RecordedRequest retry = takeRequest();
+		assertEquals("Bearer " + "r".repeat(43), first.getHeader("Authorization"));
+		assertEquals(first.getHeader("Authorization"), retry.getHeader("Authorization"));
+		assertEquals(first.getBody().readUtf8(), retry.getBody().readUtf8());
+		assertNotNull(accepted.poll(3, TimeUnit.SECONDS));
+		assertNull(failures.poll());
+		assertEquals(credentials, getField(plugin, "activeCredentials"));
+		assertTrue(transport.isConnected());
+	}
+
 	private void assertNoQuestCapture() throws Exception
 	{
 		int readsBefore = scriptReads;

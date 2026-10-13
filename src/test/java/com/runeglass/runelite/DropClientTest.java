@@ -1,0 +1,347 @@
+package com.runeglass.runelite;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+import net.runelite.client.game.ItemStack;
+import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.http.api.loottracker.LootRecordType;
+import okhttp3.OkHttpClient;
+import okhttp3.mockwebserver.Dispatcher;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import static org.junit.Assert.*;
+
+public class DropClientTest
+{
+	@Rule public TemporaryFolder temporary = new TemporaryFolder();
+	private final Gson gson = new Gson();
+	private MockWebServer server;
+	private FastScheduler executor;
+	private DropClient transport;
+	private Path root;
+	private final List<String> statuses = new CopyOnWriteArrayList<>();
+	private final AtomicInteger invalid = new AtomicInteger();
+	private final PairingClient.Credentials credentials = new PairingClient.Credentials("connection", "r".repeat(43));
+
+	@Before public void setUp() throws Exception
+	{
+		root = temporary.newFolder().toPath();
+		server = new MockWebServer(); server.start();
+		executor = new FastScheduler();
+		transport = new DropClient(new OkHttpClient(), gson, executor, server.url("/runelite/v1/drops"), root, new DropClient.Listener()
+		{
+			@Override public void onStatus(String status) { statuses.add(status); }
+			@Override public void onInvalidConnection(PairingClient.Credentials ignored, boolean mismatch) { invalid.incrementAndGet(); }
+		});
+	}
+
+	@After public void tearDown() throws Exception
+	{
+		transport.pause();
+		executor.shutdownNow();
+		server.shutdown();
+	}
+
+	@Test public void lowOnlyRewardsNeverReachDiskOrHttp() throws Exception
+	{
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		DropCapture capture = new DropCapture();
+		for (LootReceived loot : List.of(
+			DropCaptureTest.loot("Guard", LootRecordType.NPC, new ItemStack(10000, 1)),
+			DropCaptureTest.loot("Guard", LootRecordType.NPC, new ItemStack(995, 49_999)),
+			DropCaptureTest.loot("Guard", LootRecordType.NPC, new ItemStack(10001, 1), new ItemStack(10002, 1))))
+		{
+			capture.capture(loot, id -> DropCaptureTest.definition(id, true, -1, -1),
+				id -> id == 10000 ? 49_999 : 30_000, DropCaptureTest.SESSION, DropCaptureTest.NOW).event().ifPresent(transport::publish);
+		}
+		executor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+		assertEquals(0, queueSize("connection"));
+		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
+		assertEquals(0, server.getRequestCount());
+		try (java.util.stream.Stream<Path> files = Files.walk(root))
+		{
+			assertEquals(0, files.filter(Files::isRegularFile).count());
+		}
+	}
+
+	@Test public void retries429And503WithOriginalUuidAndFrozenPayload() throws Exception
+	{
+		server.enqueue(new MockResponse().setResponseCode(429).addHeader("Retry-After", "60"));
+		server.enqueue(new MockResponse().setResponseCode(503));
+		server.setDispatcher(new Dispatcher()
+		{
+			private int requests;
+			@Override public MockResponse dispatch(RecordedRequest request)
+			{
+				if (++requests == 1) return new MockResponse().setResponseCode(429).addHeader("Retry-After", "60");
+				if (requests == 2) return new MockResponse().setResponseCode(503);
+				return accepted(request, false);
+			}
+		});
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		assertTrue(transport.publish(DropCaptureTest.drop()));
+		RecordedRequest first = take();
+		RecordedRequest second = take();
+		RecordedRequest third = take();
+		assertEquals(first.getBody().snapshot(), second.getBody().snapshot());
+		assertEquals(second.getBody().snapshot(), third.getBody().snapshot());
+		assertEquals("Bearer " + credentials.getRawCredential(), first.getHeader("Authorization"));
+		assertTrue(executor.delays.contains(60_000L));
+		await(() -> queueSize("connection") == 0);
+	}
+
+	@Test public void restartAfterLostAcknowledgementResendsSameEvent() throws Exception
+	{
+		server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST));
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		transport.publish(DropCaptureTest.drop());
+		RecordedRequest first = take();
+		transport.pause();
+		await(() -> queueSize("connection") == 1);
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, new SyncContext(java.util.UUID.randomUUID().toString(), "Fixture", "regular", "standard", "1.2.0", "1.13.1", 231));
+		RecordedRequest next = take();
+		assertEquals(first.getBody().readUtf8(), next.getBody().readUtf8());
+		await(() -> queueSize("connection") == 0);
+	}
+
+	@Test public void partialAcknowledgementOnlyRemovesConfirmedBatchIds() throws Exception
+	{
+		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
+		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		server.setDispatcher(new Dispatcher()
+		{
+			@Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, true); }
+		});
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		JsonObject first = gson.fromJson(take().getBody().readUtf8(), JsonObject.class);
+		assertEquals(2, first.getAsJsonArray("events").size());
+		JsonObject second = gson.fromJson(take().getBody().readUtf8(), JsonObject.class);
+		assertEquals(1, second.getAsJsonArray("events").size());
+		assertEquals(first.getAsJsonArray("events").get(1), second.getAsJsonArray("events").get(0));
+		await(() -> queueSize("connection") == 0);
+	}
+
+	@Test public void unrelatedAcknowledgementCannotDeleteLocalRecord() throws Exception
+	{
+		server.enqueue(new MockResponse().setBody("{\"protocolVersion\":1,\"status\":\"accepted\",\"acceptedEventIds\":[\"00000000-0000-4000-8000-000000000000\"],\"serverTime\":\"2026-10-11T12:00:00Z\",\"nextUploadAfterSeconds\":5}"));
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		transport.publish(DropCaptureTest.drop()); take();
+		await(() -> statuses.stream().anyMatch(value -> value.contains("retry")));
+		transport.pause();
+		assertEquals(1, queueSize("connection"));
+	}
+
+	@Test public void optOutCancelsInFlightAndPurgesInactiveConnections() throws Exception
+	{
+		new DurableDropQueue(root, "inactive", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "inactive"));
+		server.setDispatcher(new Dispatcher()
+		{
+			@Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false).setBodyDelay(300, TimeUnit.MILLISECONDS); }
+		});
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		transport.publish(DropCaptureTest.drop()); take();
+		transport.discardAll();
+		await(() -> !Files.exists(root));
+		assertFalse(transport.isConnected());
+		assertNull(server.takeRequest(350, TimeUnit.MILLISECONDS));
+		assertFalse(Files.exists(root));
+	}
+
+	@Test public void bindingMismatchRetainsButRevokedCredentialPurges() throws Exception
+	{
+		server.enqueue(error(403, "binding_mismatch"));
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		transport.publish(DropCaptureTest.drop()); take();
+		await(() -> statuses.stream().anyMatch(value -> value.contains("binding")));
+		assertEquals(1, queueSize("connection"));
+		assertEquals(0, invalid.get());
+		server.enqueue(error(401, "invalid_connection_credential"));
+		transport.connect(credentials, DropCaptureTest.CONTEXT); take();
+		await(() -> invalid.get() == 1 && !Files.exists(root.resolve("connection")));
+	}
+
+	@Test public void unsupportedProfileNeverUploadsOrCaptures() throws Exception
+	{
+		transport.connect(credentials, new SyncContext(DropCaptureTest.SESSION.toString(), "Fixture", "regular", "league", "1.2.0", "1.13.1", 231));
+		assertFalse(transport.isConnected());
+		assertFalse(transport.publish(DropCaptureTest.drop()));
+		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
+		assertEquals(0, queueSize("connection"));
+	}
+
+	@Test public void permanentBatchFailureIsolatesOffenderAndSyncsHealthyEvent() throws Exception
+	{
+		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
+		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		String rejected = queue.batch(false).get(0).id();
+		server.setDispatcher(new Dispatcher()
+		{
+			@Override public MockResponse dispatch(RecordedRequest request)
+			{
+				JsonObject body = gson.fromJson(request.getBody().clone().readUtf8(), JsonObject.class);
+				for (com.google.gson.JsonElement event : body.getAsJsonArray("events"))
+				{
+					if (event.getAsJsonObject().get("eventId").getAsString().equals(rejected)) return error(409, "event_conflict");
+				}
+				return accepted(request, false);
+			}
+		});
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		take(); take(); take();
+		await(() -> queueSize("connection") == 0);
+		assertTrue(new DurableDropQueue(root, "connection", gson).hasDamagedRecords());
+		assertEquals(1, Files.list(root.resolve("connection")).count());
+	}
+
+	@Test public void profileChangeDuringQueuedPersistenceCannotRebindOldEvents() throws Exception
+	{
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		executor.execute(() ->
+		{
+			try { release.await(); } catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+		});
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		transport.publish(DropCaptureTest.drop());
+		transport.pause();
+		PairingClient.Credentials next = new PairingClient.Credentials("next_connection", "s".repeat(43));
+		transport.connect(next, new SyncContext(java.util.UUID.randomUUID().toString(), "Second", "regular", "standard", "1.2.0", "1.13.1", 231));
+		transport.publish(DropCaptureTest.drop());
+		release.countDown();
+		JsonObject uploaded = gson.fromJson(take().getBody().readUtf8(), JsonObject.class);
+		assertEquals("next_connection", uploaded.get("connectionId").getAsString());
+		assertEquals("Second", uploaded.getAsJsonObject("character").get("displayName").getAsString());
+		await(() -> queueSize("connection") == 1 && queueSize("next_connection") == 0);
+		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
+	}
+
+	@Test public void unfinishedOptOutMarkerPreventsOldQueueResumptionAfterRestart() throws Exception
+	{
+		new DurableDropQueue(root, "connection", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		DurableDropQueue.markDiscard(root);
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		await(() -> !Files.exists(DurableDropQueue.discardMarker(root)) && queueSize("connection") == 0);
+		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
+	}
+
+	@Test public void lootTrackerToggleStopsNewCaptureWithoutStoppingSavedUploads() throws Exception
+	{
+		RuneGlassPlugin plugin = new RuneGlassPlugin();
+		RuneGlassConfig config = new RuneGlassConfig()
+		{
+			@Override public boolean syncEnabled() { return true; }
+			@Override public boolean dropSyncEnabled() { return true; }
+		};
+		setField(plugin, "config", config);
+		setField(plugin, "dropClient", transport);
+		setField(plugin, "activeCredentials", credentials);
+		setField(plugin, "syncSessionId", DropCaptureTest.SESSION);
+		SkillsSyncSession session = new SkillsSyncSession(); session.start(); setField(plugin, "session", session);
+		server.setDispatcher(new Dispatcher()
+		{
+			int count;
+			@Override public MockResponse dispatch(RecordedRequest request)
+			{
+				return count++ == 0 ? new MockResponse().setResponseCode(503) : accepted(request, false);
+			}
+		});
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		transport.publish(DropCaptureTest.drop()); take();
+		net.runelite.client.plugins.loottracker.LootTrackerPlugin tracker = new net.runelite.client.plugins.loottracker.LootTrackerPlugin();
+		plugin.onPluginChanged(new net.runelite.client.events.PluginChanged(tracker, false));
+		assertTrue(transport.isConnected());
+		plugin.onLootReceived(null);
+		take(); await(() -> queueSize("connection") == 0);
+		plugin.onPluginChanged(new net.runelite.client.events.PluginChanged(tracker, true));
+		java.lang.reflect.Field enabled = RuneGlassPlugin.class.getDeclaredField("lootTrackerRunning"); enabled.setAccessible(true);
+		assertTrue(enabled.getBoolean(plugin));
+	}
+
+	@Test public void connectionCleanupCannotClearAnUnfinishedGlobalOptOut() throws Exception
+	{
+		new DurableDropQueue(root, "connection", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		Files.createDirectory(DurableDropQueue.discardMarker(root));
+		DurableDropQueue.markDiscard(root.resolve("connection"));
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		await(() -> statuses.stream().anyMatch(status -> status.contains("local deletion failed")));
+		assertFalse(transport.isConnected());
+		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
+		assertTrue(Files.exists(DurableDropQueue.discardMarker(root)));
+	}
+
+	private static void setField(RuneGlassPlugin plugin, String name, Object value) throws Exception
+	{
+		java.lang.reflect.Field field = RuneGlassPlugin.class.getDeclaredField(name);
+		field.setAccessible(true); field.set(plugin, value);
+	}
+
+	private MockResponse accepted(RecordedRequest request, boolean partial)
+	{
+		JsonObject body = gson.fromJson(request.getBody().clone().readUtf8(), JsonObject.class);
+		JsonArray ids = new JsonArray();
+		for (com.google.gson.JsonElement event : body.getAsJsonArray("events"))
+		{
+			ids.add(event.getAsJsonObject().get("eventId"));
+			if (partial) break;
+		}
+		JsonObject result = new JsonObject(); result.addProperty("protocolVersion", 1);
+		result.addProperty("status", "accepted"); result.add("acceptedEventIds", ids);
+		result.addProperty("serverTime", "2026-10-11T12:00:00Z"); result.addProperty("nextUploadAfterSeconds", 5);
+		return new MockResponse().setBody(gson.toJson(result));
+	}
+
+	private static MockResponse error(int code, String error)
+	{
+		return new MockResponse().setResponseCode(code).setBody("{\"protocolVersion\":1,\"error\":\"" + error + "\"}");
+	}
+	private RecordedRequest take() throws InterruptedException
+	{
+		RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS); assertNotNull(statuses.toString() + executor.delays.toString(), request); return request;
+	}
+	private int queueSize(String connectionId)
+	{
+		try
+		{
+			if (!Files.exists(root.resolve(connectionId))) return 0;
+			return new DurableDropQueue(root, connectionId, gson).size();
+		}
+		catch (Exception exception) { return -1; }
+	}
+	private static void await(BooleanSupplier condition) throws InterruptedException
+	{
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+		while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
+		assertTrue(condition.getAsBoolean());
+	}
+	private static final class FastScheduler extends ScheduledThreadPoolExecutor
+	{
+		final List<Long> delays = new CopyOnWriteArrayList<>();
+		FastScheduler() { super(1); }
+		@Override public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit)
+		{
+			delays.add(unit.toMillis(delay));
+			return super.schedule(command, Math.min(150, unit.toMillis(delay)), TimeUnit.MILLISECONDS);
+		}
+	}
+}
