@@ -43,6 +43,16 @@ test {
 	}
 }
 
+tasks.withType(Test).configureEach { task ->
+	def testHome = layout.buildDirectory.dir("test-home/${task.name}").get().asFile
+	systemProperty 'user.home', testHome.absolutePath
+	systemProperty 'runeglass.testHome', testHome.absolutePath
+	doFirst {
+		testHome.deleteDir()
+		testHome.mkdirs()
+	}
+}
+
 tasks.register('run', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = pluginMainClass
@@ -63,7 +73,8 @@ tasks.register('prepareDevelopmentSources', Sync) {
 	filter { line ->
 		line.replace('https://fast-duck-448.eu-west-1.convex.site/',
 			'https://small-cassowary-898.eu-west-1.convex.site/')
-			.replace('.resolve("runeglass")', '.resolve("runeglass-development")')
+			.replace('internalName = "runeglass"', 'internalName = "runeglass-development"')
+			.replace('legacyDataDirectory = "runeglass"', 'legacyDataDirectory = "runeglass-development"')
 	}
 }
 
@@ -104,9 +115,22 @@ tasks.register('verifyDevelopmentIsolation') {
 			assert developmentClass.contains('https://small-cassowary-898.eu-west-1.convex.site/')
 			assert !developmentClass.contains('fast-duck-448')
 		}
+		def pluginSourcePath = 'com/runeglass/runelite/RuneGlassPlugin.java'
+		def productionSource = file("src/main/java/${pluginSourcePath}").getText('UTF-8')
+		def developmentSource = developmentSources.get().file(pluginSourcePath).asFile.getText('UTF-8')
+		assert productionSource.contains('internalName = "runeglass"')
+		assert productionSource.contains('legacyDataDirectory = "runeglass"')
+		assert developmentSource.contains('internalName = "runeglass-development"')
+		assert developmentSource.contains('legacyDataDirectory = "runeglass-development"')
+		assert !developmentSource.contains('"runeglass"')
 		def pluginPath = 'com/runeglass/runelite/RuneGlassPlugin.class'
-		assert new File(sourceSets.development.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1').contains('runeglass-development')
-		assert !new File(sourceSets.main.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1').contains('runeglass-development')
+		def storageName = { String name -> new String([0, name.length()] as byte[], 'ISO-8859-1') + name }
+		def productionPlugin = new File(sourceSets.main.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1')
+		def developmentPlugin = new File(sourceSets.development.output.classesDirs.singleFile, pluginPath).getText('ISO-8859-1')
+		assert productionPlugin.contains(storageName('runeglass'))
+		assert !productionPlugin.contains('runeglass-development')
+		assert developmentPlugin.contains(storageName('runeglass-development'))
+		assert !developmentPlugin.contains(storageName('runeglass'))
 
 		def developmentOnly = fileTree(developmentOnlySources).include('**/*.java').files.collect { it.name - '.java' }
 		def productionClasses = files(sourceSets.main.output.classesDirs, sourceSets.test.output.classesDirs).asFileTree.files +
@@ -136,7 +160,7 @@ tasks.register('runDevelopment', JavaExec) {
 	}
 	args '--developer-mode', '--debug'
 	doFirst {
-		logger.lifecycle('RuneGlass DEVELOPMENT: small-cassowary-898; isolated runeglass-development connection storage; DEV drop test controls')
+		logger.lifecycle('RuneGlass DEVELOPMENT: small-cassowary-898; isolated plugin-data/runeglass-development storage; DEV drop test controls')
 	}
 }
 tasks.register('previewDropTestPanel', JavaExec) {

@@ -26,7 +26,7 @@ public class RuneGlassConfigTest
 	}
 
 	@Test
-	public void onlyMasterSyncShowsTheSharingWarning() throws Exception
+	public void masterAndNewDropConsentShowTheirSharingWarnings() throws Exception
 	{
 		int warningCount = 0;
 		for (Method method : RuneGlassConfig.class.getDeclaredMethods())
@@ -34,12 +34,13 @@ public class RuneGlassConfigTest
 			ConfigItem item = method.getAnnotation(ConfigItem.class);
 			if (item != null && !item.warning().isEmpty())
 			{
-				assertEquals("syncEnabled", item.keyName());
-				assertEquals(RuneGlassConfig.THIRD_PARTY_WARNING, item.warning());
+				assertTrue(item.keyName().equals("syncEnabled") || item.keyName().equals("dropSyncEnabled"));
+				assertEquals(item.keyName().equals("syncEnabled")
+					? RuneGlassConfig.THIRD_PARTY_WARNING : RuneGlassConfig.DROP_SHARING_WARNING, item.warning());
 				warningCount++;
 			}
 		}
-		assertEquals(1, warningCount);
+		assertEquals(2, warningCount);
 
 		String warning = RuneGlassConfig.THIRD_PARTY_WARNING;
 		assertTrue(warning.length() <= 300);
@@ -77,7 +78,16 @@ public class RuneGlassConfigTest
 	@Test
 	public void dropConsentDisclosesCapturedStackThresholdAndWholeRewardRetention() throws Exception
 	{
-		String description = RuneGlassConfig.class.getMethod("dropSyncEnabled").getAnnotation(ConfigItem.class).description();
+		ConfigItem item = RuneGlassConfig.class.getMethod("dropSyncEnabled").getAnnotation(ConfigItem.class);
+		assertTrue(item.warning().contains("drop sources, items, quantities, times and value estimates"));
+		assertTrue(item.warning().contains("not controlled or verified by"));
+		assertTrue(item.warning().contains("Saved history remains until you delete it"));
+		assertTrue(item.warning().length() <= 300);
+		for (String line : item.warning().split("\n"))
+		{
+			assertTrue(line.length() <= 80);
+		}
+		String description = item.description();
 		assertTrue(description.contains("item stack worth at least 50,000 GP at capture"));
 		assertTrue(description.contains("curated notable reward, including all accompanying items"));
 		assertTrue(description.contains("Loot Tracker must be enabled"));

@@ -4,30 +4,20 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.IOException;
-import java.io.Reader;
 import java.math.BigInteger;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.PosixFilePermission;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
-import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.regex.Pattern;
+import net.runelite.client.util.Filepath;
 
 final class ConnectionStateStore
 {
 	static final String FILE_NAME = "connection-state-v1.json";
-	static final String TEMP_FILE_NAME = "connection-state-v1.tmp";
+	static final String TEMP_PREFIX = "connection-state-v1.";
 	static final String LEGACY_CONFIG_KEY = "connectionStateV1";
 
 	private static final int FORMAT_VERSION = 1;
@@ -35,13 +25,6 @@ final class ConnectionStateStore
 	private static final Pattern CONNECTION_ID = Pattern.compile("^pcn_[A-Za-z0-9_-]{43}$");
 	private static final Pattern CREDENTIAL = Pattern.compile("^[A-Za-z0-9_-]{43}$");
 	private static final Pattern SEQUENCE = Pattern.compile("^[1-9][0-9]{0,19}$");
-	private static final Set<PosixFilePermission> DIRECTORY_PERMISSIONS = EnumSet.of(
-		PosixFilePermission.OWNER_READ,
-		PosixFilePermission.OWNER_WRITE,
-		PosixFilePermission.OWNER_EXECUTE);
-	private static final Set<PosixFilePermission> FILE_PERMISSIONS = EnumSet.of(
-		PosixFilePermission.OWNER_READ,
-		PosixFilePermission.OWNER_WRITE);
 
 	static final class State
 	{
@@ -84,12 +67,11 @@ final class ConnectionStateStore
 		}
 	}
 
-	private final Path directory;
-	private final Path stateFile;
-	private final Path temporaryFile;
+	private final Filepath directory;
+	private final Filepath stateFile;
 	private final Gson gson;
 
-	ConnectionStateStore(Path profilesDirectory, String profileKey, Gson gson)
+	ConnectionStateStore(Filepath profilesDirectory, String profileKey, Gson gson)
 	{
 		Objects.requireNonNull(profilesDirectory, "profilesDirectory");
 		Objects.requireNonNull(profileKey, "profileKey");
@@ -97,9 +79,8 @@ final class ConnectionStateStore
 		{
 			throw new IllegalArgumentException("RuneLite profile key is required");
 		}
-		this.directory = profilesDirectory.resolve(hashProfileKey(profileKey));
-		this.stateFile = directory.resolve(FILE_NAME);
-		this.temporaryFile = directory.resolve(TEMP_FILE_NAME);
+		this.directory = profilesDirectory.joinSegment(hashProfileKey(profileKey));
+		this.stateFile = directory.joinSegment(FILE_NAME);
 		this.gson = Objects.requireNonNull(gson, "gson");
 	}
 
@@ -107,16 +88,12 @@ final class ConnectionStateStore
 	{
 		try
 		{
-			Files.deleteIfExists(temporaryFile);
-			if (!Files.exists(stateFile) || Files.size(stateFile) > MAX_FILE_BYTES)
+			PrivateFiles.deleteTemporaryFiles(directory, TEMP_PREFIX);
+			if (!stateFile.exists() || stateFile.size() > MAX_FILE_BYTES)
 			{
 				return Optional.empty();
 			}
-			JsonObject body;
-			try (Reader reader = Files.newBufferedReader(stateFile, StandardCharsets.UTF_8))
-			{
-				body = new JsonParser().parse(reader).getAsJsonObject();
-			}
+			JsonObject body = new JsonParser().parse(PrivateFiles.readUtf8(stateFile)).getAsJsonObject();
 			if (!ProtocolJson.hasExactKeys(
 				body,
 				"version",
@@ -131,8 +108,6 @@ final class ConnectionStateStore
 			String credential = ProtocolJson.stringValue(body, "credential");
 			String nextSequence = ProtocolJson.stringValue(body, "nextSequence");
 			validate(connectionId, credential, nextSequence);
-			applyPrivatePermissions(directory, DIRECTORY_PERMISSIONS);
-			applyPrivatePermissions(stateFile, FILE_PERMISSIONS);
 			return Optional.of(new State(
 				new PairingClient.Credentials(connectionId, credential),
 				new BigInteger(nextSequence)));
@@ -160,48 +135,12 @@ final class ConnectionStateStore
 		}
 		try
 		{
-			Files.createDirectories(directory);
-			applyPrivatePermissions(directory, DIRECTORY_PERMISSIONS);
-			try (FileChannel channel = FileChannel.open(
-				temporaryFile,
-				StandardOpenOption.CREATE,
-				StandardOpenOption.TRUNCATE_EXISTING,
-				StandardOpenOption.WRITE))
-			{
-				applyPrivatePermissions(temporaryFile, FILE_PERMISSIONS);
-				ByteBuffer buffer = ByteBuffer.wrap(serialized);
-				while (buffer.hasRemaining())
-				{
-					channel.write(buffer);
-				}
-				channel.force(true);
-			}
-			try
-			{
-				Files.move(
-					temporaryFile,
-					stateFile,
-					StandardCopyOption.ATOMIC_MOVE,
-					StandardCopyOption.REPLACE_EXISTING);
-			}
-			catch (AtomicMoveNotSupportedException exception)
-			{
-				Files.deleteIfExists(temporaryFile);
-				return false;
-			}
-			applyPrivatePermissions(stateFile, FILE_PERMISSIONS);
+			PrivateFiles.createDirectory(directory);
+			PrivateFiles.write(stateFile, TEMP_PREFIX, serialized);
 			return true;
 		}
 		catch (IOException | RuntimeException exception)
 		{
-			try
-			{
-				Files.deleteIfExists(temporaryFile);
-			}
-			catch (IOException ignored)
-			{
-				return false;
-			}
 			return false;
 		}
 	}
@@ -210,9 +149,9 @@ final class ConnectionStateStore
 	{
 		try
 		{
-			Files.deleteIfExists(temporaryFile);
-			Files.deleteIfExists(stateFile);
-			Files.deleteIfExists(directory);
+			PrivateFiles.deleteTemporaryFiles(directory, TEMP_PREFIX);
+			stateFile.deleteIfExists();
+			directory.deleteIfExists();
 			return true;
 		}
 		catch (IOException | RuntimeException exception)
@@ -221,7 +160,7 @@ final class ConnectionStateStore
 		}
 	}
 
-	Path getStateFile()
+	Filepath getStateFile()
 	{
 		return stateFile;
 	}
@@ -248,20 +187,6 @@ final class ConnectionStateStore
 		catch (NoSuchAlgorithmException exception)
 		{
 			throw new IllegalStateException("SHA-256 is unavailable", exception);
-		}
-	}
-
-	private static void applyPrivatePermissions(
-		Path path,
-		Set<PosixFilePermission> permissions) throws IOException
-	{
-		try
-		{
-			Files.setPosixFilePermissions(path, permissions);
-		}
-		catch (UnsupportedOperationException ignored)
-		{
-			return;
 		}
 	}
 }

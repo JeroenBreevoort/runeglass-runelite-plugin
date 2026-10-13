@@ -5,28 +5,22 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import net.runelite.client.util.Filepath;
 
 final class DurableDropQueue
 {
 	static final int MAX_BATCH_BYTES = 64 * 1_024;
 	static final long MAX_BYTES = 5 * 1_024 * 1_024;
 	static final int MAX_EVENTS = 10_000;
-	private final Path directory;
+	private final Filepath directory;
 	private final Gson gson;
 	private final String connectionId;
 	private final List<Entry> entries = new ArrayList<>();
@@ -35,29 +29,27 @@ final class DurableDropQueue
 	private int fileCount;
 	private boolean damaged;
 
-	DurableDropQueue(Path root, String connectionId, Gson gson) throws IOException
+	DurableDropQueue(Filepath root, String connectionId, Gson gson) throws IOException
 	{
 		if (!connectionId.matches("[A-Za-z0-9_-]{1,128}")) throw new IOException("Invalid connection");
-		this.directory = root.resolve(connectionId);
+		this.directory = root.joinSegment(connectionId);
 		this.connectionId = connectionId;
 		this.gson = gson;
-		Files.createDirectories(directory);
-		privatePermissions(root, "rwx------");
-		privatePermissions(directory, "rwx------");
-		try (Stream<Path> files = Files.list(directory))
+		PrivateFiles.createDirectory(directory);
+		try (Stream<Filepath> files = directory.walk(1))
 		{
-			for (Path path : files.sorted().collect(Collectors.toList()))
+			for (Filepath path : files.filter(file -> !file.equals(directory)).sorted().collect(Collectors.toList()))
 			{
 				fileCount++;
-				long size = Files.size(path);
+				long size = path.size();
 				bytes += size;
-				String name = path.getFileName().toString();
+				String name = path.getFileName();
 				try
 				{
 					if (!name.matches("[0-9]{20}-[a-f0-9-]{36}\\.json")) throw new IOException("Uncommitted record");
 					sequence = Math.max(sequence, Long.parseLong(name.substring(0, 20)));
 					if (size > MAX_BATCH_BYTES) throw new IOException("Oversized record");
-					JsonObject body = gson.fromJson(Files.readString(path), JsonObject.class);
+					JsonObject body = gson.fromJson(PrivateFiles.readUtf8(path), JsonObject.class);
 					validate(body, connectionId);
 					String id = body.getAsJsonArray("events").get(0).getAsJsonObject().get("eventId").getAsString();
 					if (!name.substring(21, 57).equals(id)) throw new IOException("Record identity mismatch");
@@ -79,29 +71,8 @@ final class DurableDropQueue
 		if (fileCount >= MAX_EVENTS || bytes + data.length > MAX_BYTES) throw new CapacityException();
 		String id = body.getAsJsonArray("events").get(0).getAsJsonObject().get("eventId").getAsString();
 		String name = String.format(java.util.Locale.ROOT, "%020d-%s.json", (sequence = Math.incrementExact(sequence)), id);
-		Path target = directory.resolve(name);
-		Path temporary = directory.resolve(name + ".tmp");
-		try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE))
-		{
-			privatePermissions(temporary, "rw-------");
-			ByteBuffer buffer = ByteBuffer.wrap(data);
-			while (buffer.hasRemaining()) channel.write(buffer);
-			channel.force(true);
-		}
-		catch (IOException | RuntimeException exception)
-		{
-			Files.deleteIfExists(temporary);
-			throw exception;
-		}
-		try
-		{
-			Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
-		}
-		catch (IOException exception)
-		{
-			Files.deleteIfExists(temporary);
-			throw exception;
-		}
+		Filepath target = directory.joinSegment(name);
+		PrivateFiles.write(target, name + ".", data);
 		entries.add(new Entry(target, body.deepCopy(), data.length));
 		bytes += data.length;
 		fileCount++;
@@ -138,7 +109,7 @@ final class DurableDropQueue
 		for (Entry entry : batch)
 		{
 			if (!ids.contains(entry.id())) continue;
-			Files.delete(entry.path);
+			entry.path.delete();
 			entries.remove(entry);
 			bytes -= entry.bytes;
 			fileCount--;
@@ -147,7 +118,7 @@ final class DurableDropQueue
 
 	void block(Entry entry) throws IOException
 	{
-		Files.move(entry.path, entry.path.resolveSibling(entry.path.getFileName() + ".blocked"), StandardCopyOption.ATOMIC_MOVE);
+		entry.path.moveTo(entry.path.getParent().joinSegment(entry.path.getFileName() + ".blocked"), StandardCopyOption.ATOMIC_MOVE);
 		entries.remove(entry);
 		damaged = true;
 	}
@@ -155,31 +126,21 @@ final class DurableDropQueue
 	int size() { return entries.size(); }
 	boolean hasDamagedRecords() { return damaged; }
 
-	static Path discardMarker(Path directory)
+	static Filepath discardMarker(Filepath directory)
 	{
-		return directory.resolveSibling(directory.getFileName() + ".discard");
+		return directory.getParent().joinSegment(directory.getFileName() + ".discard");
 	}
 
-	static void markDiscard(Path directory) throws IOException
+	static void markDiscard(Filepath directory) throws IOException
 	{
-		Files.createDirectories(directory.getParent());
-		privatePermissions(directory.getParent(), "rwx------");
-		Path marker = discardMarker(directory);
-		try (FileChannel channel = FileChannel.open(marker, StandardOpenOption.CREATE, StandardOpenOption.WRITE))
-		{
-			privatePermissions(marker, "rw-------");
-			channel.write(ByteBuffer.wrap(new byte[]{1}));
-			channel.force(true);
-		}
+		Filepath marker = discardMarker(directory);
+		PrivateFiles.createDirectory(marker.getParent());
+		PrivateFiles.write(marker, marker.getFileName() + ".", new byte[]{1});
 	}
 
-	static void purge(Path root) throws IOException
+	static void purge(Filepath root) throws IOException
 	{
-		if (!Files.exists(root)) return;
-		try (Stream<Path> files = Files.walk(root))
-		{
-			for (Path file : files.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) Files.delete(file);
-		}
+		if (root.exists()) root.deleteRecursively();
 	}
 
 	private static boolean sameEnvelope(JsonObject left, JsonObject right)
@@ -261,18 +222,12 @@ final class DurableDropQueue
 		if (!valid) throw new IOException("Invalid stored drop");
 	}
 
-	private static void privatePermissions(Path path, String permissions) throws IOException
-	{
-		try { Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(permissions)); }
-		catch (UnsupportedOperationException ignored) { return; }
-	}
-
 	static final class Entry
 	{
-		final Path path;
+		final Filepath path;
 		final JsonObject body;
 		final long bytes;
-		Entry(Path path, JsonObject body, long bytes) { this.path = path; this.body = body; this.bytes = bytes; }
+		Entry(Filepath path, JsonObject body, long bytes) { this.path = path; this.body = body; this.bytes = bytes; }
 		String id() { return body.getAsJsonArray("events").get(0).getAsJsonObject().get("eventId").getAsString(); }
 	}
 

@@ -4,8 +4,6 @@ import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.io.IOException;
-import java.nio.file.Path;
-import java.nio.file.Files;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.HashSet;
@@ -16,6 +14,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import net.runelite.client.util.Filepath;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.HttpUrl;
@@ -37,7 +36,7 @@ final class DropClient
 	private final Gson gson;
 	private final ScheduledExecutorService executor;
 	private final HttpUrl endpoint;
-	private final Path root;
+	private final Filepath root;
 	private final Listener listener;
 	private final ArrayDeque<Runnable> work = new ArrayDeque<>();
 	private final AtomicInteger capturesWaiting = new AtomicInteger();
@@ -46,13 +45,13 @@ final class DropClient
 	private final Set<State> pendingStates = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 	private volatile State active;
 
-	static DropClient create(OkHttpClient http, Gson gson, ScheduledExecutorService executor, Path root, Listener listener)
+	static DropClient create(OkHttpClient http, Gson gson, ScheduledExecutorService executor, Filepath root, Listener listener)
 	{
 		return new DropClient(http, gson, executor,
 			Objects.requireNonNull(HttpUrl.parse(PairingClient.BASE_URL)).resolve("runelite/v1/drops"), root, listener);
 	}
 
-	DropClient(OkHttpClient http, Gson gson, ScheduledExecutorService executor, HttpUrl endpoint, Path root, Listener listener)
+	DropClient(OkHttpClient http, Gson gson, ScheduledExecutorService executor, HttpUrl endpoint, Filepath root, Listener listener)
 	{
 		this.http = http;
 		this.gson = gson;
@@ -71,10 +70,10 @@ final class DropClient
 		submit(() ->
 		{
 			if (state.revoked) return;
-			if (Files.exists(DurableDropQueue.discardMarker(root))) purge(root);
-			if (Files.exists(DurableDropQueue.discardMarker(root.resolve(credentials.getConnectionId()))))
+			if (DurableDropQueue.discardMarker(root).exists()) purge(root);
+			if (DurableDropQueue.discardMarker(root.joinSegment(credentials.getConnectionId())).exists())
 			{
-				purge(root.resolve(credentials.getConnectionId()));
+				purge(root.joinSegment(credentials.getConnectionId()));
 			}
 			if (purgeFailed)
 			{
@@ -183,17 +182,20 @@ final class DropClient
 			previous.revoked = true;
 			pause();
 		}
-		if (connectionId.matches("[A-Za-z0-9_-]{1,128}")) submit(() -> purge(root.resolve(connectionId)));
+		if (connectionId.matches("[A-Za-z0-9_-]{1,128}")) submit(() -> purge(root.joinSegment(connectionId)));
 	}
 
-	private void purge(Path path)
+	private void purge(Filepath path)
 	{
 		try
 		{
-			DurableDropQueue.markDiscard(path);
-			DurableDropQueue.purge(path);
-			Files.deleteIfExists(DurableDropQueue.discardMarker(path));
-			purgeFailed = Files.exists(DurableDropQueue.discardMarker(root));
+			if (path.exists() || DurableDropQueue.discardMarker(path).exists())
+			{
+				DurableDropQueue.markDiscard(path);
+				DurableDropQueue.purge(path);
+				DurableDropQueue.discardMarker(path).deleteIfExists();
+			}
+			purgeFailed = DurableDropQueue.discardMarker(root).exists();
 			if (active == null) listener.onStatus("Drop sync is off. Pending drops have been removed; synced history remains until deletion.");
 		}
 		catch (IOException | RuntimeException exception)

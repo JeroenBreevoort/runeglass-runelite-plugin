@@ -116,7 +116,8 @@ final class DropHandlerFixture implements AutoCloseable
 			ScheduledExecutorService.class, ClientThread.class, EventBus.class, ItemClient.class, RuneLiteConfig.class);
 		itemConstructor.setAccessible(true);
 		ItemManager itemManager = itemConstructor.newInstance(client, inert, null, new EventBus(), null, null);
-		dropClient = new DropClient(new OkHttpClient(), gson, executor, server.url("/runelite/v1/drops"), root, new DropClient.Listener()
+		dropClient = new DropClient(new OkHttpClient(), gson, executor, server.url("/runelite/v1/drops"),
+			TestStorage.rooted(root).joinSegment("drops-v1"), new DropClient.Listener()
 		{
 			@Override public void onStatus(String status) { statuses.add(status); }
 			@Override public void onInvalidConnection(PairingClient.Credentials credentials, boolean bindingMismatch) { }

@@ -10,6 +10,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -18,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 
 public class DurableSnapshotQueueTest
 {
@@ -111,15 +115,31 @@ public class DurableSnapshotQueueTest
 		Path directory = temporaryFolder.newFolder("clear").toPath();
 		DurableSnapshotQueue queue = queue(directory, new MutableClock(STARTED_AT));
 		queue.enqueue("record-1", "{\"synthetic\":true}");
-		Files.write(
-			directory.resolve(DurableSnapshotQueue.TEMP_FILE_NAME),
-			"partial".getBytes(StandardCharsets.UTF_8));
+		writeOrphans(directory);
 
 		queue.clear();
 
 		assertEquals(0, queue.size());
-		assertFalse(Files.exists(directory.resolve(DurableSnapshotQueue.FILE_NAME)));
-		assertFalse(Files.exists(directory.resolve(DurableSnapshotQueue.TEMP_FILE_NAME)));
+		assertEquals(List.of("unrelated.tmp"), names(directory));
+	}
+
+	@Test
+	public void restartRemovesInterruptedWritesAndKeepsTheCommittedQueuePrivate() throws Exception
+	{
+		Path directory = temporaryFolder.getRoot().toPath().resolve("private");
+		MutableClock clock = new MutableClock(STARTED_AT);
+		queue(directory, clock).enqueue("record-1", "{\"synthetic\":1}");
+		writeOrphans(directory);
+
+		DurableSnapshotQueue restored = queue(directory, clock);
+
+		assertEquals(DurableSnapshotQueue.LoadStatus.READY, restored.getLoadStatus());
+		assertEquals("record-1", restored.peek().orElseThrow(AssertionError::new).getRecordId());
+		assertEquals(List.of(DurableSnapshotQueue.FILE_NAME, "unrelated.tmp"), names(directory));
+		assertEquals(List.of("private"), names(directory.getParent()));
+		assumeTrue(TestStorage.posix());
+		assertEquals("rw-------", TestStorage.permissions(directory.resolve(DurableSnapshotQueue.FILE_NAME)));
+		assertEquals("rwx------", TestStorage.permissions(directory));
 	}
 
 	@Test
@@ -167,7 +187,26 @@ public class DurableSnapshotQueueTest
 
 	private static DurableSnapshotQueue queue(Path directory, Clock clock) throws IOException
 	{
-		return new DurableSnapshotQueue(directory, new Gson(), clock);
+		return new DurableSnapshotQueue(
+			TestStorage.rooted(directory.getParent()).joinSegment(directory.getFileName().toString()),
+			new Gson(),
+			clock);
+	}
+
+	private static void writeOrphans(Path directory) throws IOException
+	{
+		byte[] partial = "partial".getBytes(StandardCharsets.UTF_8);
+		Files.write(directory.resolve("snapshot-queue-v1.tmp"), partial);
+		Files.write(directory.resolve("snapshot-queue-v1.6012893.tmp"), partial);
+		Files.write(directory.resolve("unrelated.tmp"), partial);
+	}
+
+	private static List<String> names(Path directory) throws IOException
+	{
+		try (Stream<Path> files = Files.list(directory))
+		{
+			return files.map(file -> file.getFileName().toString()).sorted().collect(Collectors.toList());
+		}
 	}
 
 	private static final class MutableClock extends Clock

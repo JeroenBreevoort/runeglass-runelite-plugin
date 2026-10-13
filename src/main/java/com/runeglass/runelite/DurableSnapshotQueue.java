@@ -6,15 +6,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.IOException;
-import java.io.Reader;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -25,11 +17,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
+import net.runelite.client.util.Filepath;
 
 final class DurableSnapshotQueue
 {
 	static final String FILE_NAME = "snapshot-queue-v1.json";
-	static final String TEMP_FILE_NAME = "snapshot-queue-v1.tmp";
+	static final String TEMP_PREFIX = "snapshot-queue-v1.";
 	static final long MAX_FILE_BYTES = 5L * 1_024L * 1_024L;
 	static final int MAX_ENTRY_BYTES = 256 * 1_024;
 	static final Duration MAX_AGE = Duration.ofDays(7);
@@ -128,19 +121,17 @@ final class DurableSnapshotQueue
 		}
 	}
 
-	private final Path directory;
-	private final Path queueFile;
-	private final Path temporaryFile;
+	private final Filepath directory;
+	private final Filepath queueFile;
 	private final Gson gson;
 	private final Clock clock;
 	private final List<Entry> entries = new ArrayList<>();
 	private LoadStatus loadStatus = LoadStatus.READY;
 
-	DurableSnapshotQueue(Path directory, Gson gson, Clock clock) throws IOException
+	DurableSnapshotQueue(Filepath directory, Gson gson, Clock clock) throws IOException
 	{
 		this.directory = Objects.requireNonNull(directory, "directory");
-		this.queueFile = directory.resolve(FILE_NAME);
-		this.temporaryFile = directory.resolve(TEMP_FILE_NAME);
+		this.queueFile = directory.joinSegment(FILE_NAME);
 		this.gson = Objects.requireNonNull(gson, "gson");
 		this.clock = Objects.requireNonNull(clock, "clock");
 		load();
@@ -161,8 +152,7 @@ final class DurableSnapshotQueue
 		int expiredDropped = entries.size() - candidate.size();
 		if (expiredDropped > 0)
 		{
-			Files.deleteIfExists(temporaryFile);
-			Files.deleteIfExists(queueFile);
+			deleteFiles();
 			entries.clear();
 			loadStatus = LoadStatus.DISCARDED_EXPIRED;
 			throw new IOException("RuneGlass queue retention expired");
@@ -225,8 +215,7 @@ final class DurableSnapshotQueue
 
 	synchronized void clear() throws IOException
 	{
-		Files.deleteIfExists(temporaryFile);
-		Files.deleteIfExists(queueFile);
+		deleteFiles();
 		entries.clear();
 		loadStatus = LoadStatus.READY;
 	}
@@ -243,15 +232,15 @@ final class DurableSnapshotQueue
 
 	private void load() throws IOException
 	{
-		Files.deleteIfExists(temporaryFile);
-		if (!Files.exists(queueFile))
+		PrivateFiles.deleteTemporaryFiles(directory, TEMP_PREFIX);
+		if (!queueFile.exists())
 		{
 			return;
 		}
 		final List<Entry> loaded;
 		try
 		{
-			if (Files.size(queueFile) > MAX_FILE_BYTES)
+			if (queueFile.size() > MAX_FILE_BYTES)
 			{
 				throw new IOException("RuneGlass queue exceeds its size limit");
 			}
@@ -260,8 +249,7 @@ final class DurableSnapshotQueue
 		catch (IOException | RuntimeException exception)
 		{
 			entries.clear();
-			Files.deleteIfExists(temporaryFile);
-			Files.deleteIfExists(queueFile);
+			deleteFiles();
 			loadStatus = LoadStatus.RECOVERED_CORRUPTION;
 			return;
 		}
@@ -270,18 +258,14 @@ final class DurableSnapshotQueue
 		if (expiredDropped > 0)
 		{
 			entries.clear();
-			Files.deleteIfExists(queueFile);
+			queueFile.deleteIfExists();
 			loadStatus = LoadStatus.DISCARDED_EXPIRED;
 		}
 	}
 
 	private List<Entry> readEntries() throws IOException
 	{
-		JsonElement parsed;
-		try (Reader reader = Files.newBufferedReader(queueFile, StandardCharsets.UTF_8))
-		{
-			parsed = new JsonParser().parse(reader);
-		}
+		JsonElement parsed = new JsonParser().parse(PrivateFiles.readUtf8(queueFile));
 		if (!parsed.isJsonObject())
 		{
 			throw new IOException("RuneGlass queue must be an object");
@@ -344,8 +328,7 @@ final class DurableSnapshotQueue
 	{
 		if (candidate.isEmpty())
 		{
-			Files.deleteIfExists(temporaryFile);
-			Files.deleteIfExists(queueFile);
+			deleteFiles();
 			return;
 		}
 		persist(serialize(candidate));
@@ -376,33 +359,14 @@ final class DurableSnapshotQueue
 		{
 			throw new IOException("RuneGlass queue exceeds its size limit");
 		}
-		Files.createDirectories(directory);
-		try (FileChannel channel = FileChannel.open(
-			temporaryFile,
-			StandardOpenOption.CREATE,
-			StandardOpenOption.TRUNCATE_EXISTING,
-			StandardOpenOption.WRITE))
-		{
-			ByteBuffer buffer = ByteBuffer.wrap(serialized);
-			while (buffer.hasRemaining())
-			{
-				channel.write(buffer);
-			}
-			channel.force(true);
-		}
-		try
-		{
-			Files.move(
-				temporaryFile,
-				queueFile,
-				StandardCopyOption.ATOMIC_MOVE,
-				StandardCopyOption.REPLACE_EXISTING);
-		}
-		catch (AtomicMoveNotSupportedException exception)
-		{
-			Files.deleteIfExists(temporaryFile);
-			throw new IOException("Atomic RuneGlass queue writes are not supported", exception);
-		}
+		PrivateFiles.createDirectory(directory);
+		PrivateFiles.write(queueFile, TEMP_PREFIX, serialized);
+	}
+
+	private void deleteFiles() throws IOException
+	{
+		PrivateFiles.deleteTemporaryFiles(directory, TEMP_PREFIX);
+		queueFile.deleteIfExists();
 	}
 
 	private static Entry copy(Entry entry)

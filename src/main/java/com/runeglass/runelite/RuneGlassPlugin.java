@@ -7,7 +7,6 @@ import java.awt.Color;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.math.BigInteger;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -16,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import net.runelite.api.Client;
@@ -42,9 +42,9 @@ import net.runelite.client.events.PluginChanged;
 import net.runelite.client.plugins.loottracker.LootTrackerPlugin;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.game.ItemManager;
-import net.runelite.client.RuneLite;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.Filepath;
 import okhttp3.OkHttpClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,7 +52,9 @@ import org.slf4j.LoggerFactory;
 @PluginDescriptor(
 	name = "RuneGlass",
 	description = "Synchronizes your current character's skills, XP, and opted-in timers, quests and drops with RuneGlass",
-	tags = {"mobile", "progress", "skills", "xp", "timers", "sync"}
+	tags = {"mobile", "progress", "skills", "xp", "timers", "sync"},
+	internalName = "runeglass",
+	legacyDataDirectory = "runeglass"
 )
 public class RuneGlassPlugin extends Plugin
 {
@@ -110,6 +112,9 @@ public class RuneGlassPlugin extends Plugin
 	private SemanticSnapshotClient<AppearanceSnapshot> appearanceClient;
 	private ConnectionStateStore connectionStateStore;
 	private DropClient dropClient;
+	private volatile Object storageRequest;
+	private volatile boolean storageSettled;
+	private volatile Filepath storageDirectory;
 	private final DropCapture dropCapture = new DropCapture();
 	private volatile DropCaptureObserver dropCaptureObserver;
 	private RuneGlassPanel panel;
@@ -170,8 +175,76 @@ public class RuneGlassPlugin extends Plugin
 			() -> clientThread.invokeLater(this::stopPairing),
 			() -> clientThread.invokeLater(this::requestManualSync));
 		panel.showDropCaptureAvailable(lootTrackerRunning);
-		dropClient = DropClient.create(httpClient, gson, executor,
-			RuneLite.RUNELITE_DIR.toPath().resolve("runeglass").resolve("drops-v1"), new DropClient.Listener()
+		if (config.syncEnabled() && config.dropSyncEnabled())
+		{
+			panel.showDropStatus("Drop sync enabled. Log in and pair this profile; Loot Tracker must be enabled.");
+		}
+		navigationButton = NavigationButton.builder()
+			.tooltip("RuneGlass Sync")
+			.icon(createNavigationIcon())
+			.priority(8)
+			.panel(panel)
+			.build();
+		clientToolbar.addNavigation(navigationButton);
+
+		LOG.debug("RuneGlass started");
+		requestStorage();
+		refreshPairingPanel();
+	}
+
+	void requestStorage()
+	{
+		Object request = new Object();
+		storageRequest = request;
+		storageSettled = false;
+		storageDirectory = null;
+		try
+		{
+			executor.execute(() ->
+			{
+				Filepath directory = openStorageDirectory();
+				clientThread.invokeLater(() -> storageOpened(request, directory));
+			});
+		}
+		catch (RuntimeException exception)
+		{
+			LOG.debug("RuneGlass local storage could not be scheduled");
+			clientThread.invokeLater(() -> storageOpened(request, null));
+		}
+	}
+
+	Filepath openStorageDirectory()
+	{
+		return openStorageDirectory(this::getPluginDirectory);
+	}
+
+	static Filepath openStorageDirectory(Callable<Filepath> pluginDirectory)
+	{
+		for (int attempt = 0; attempt < 2; attempt++)
+		{
+			try
+			{
+				return pluginDirectory.call();
+			}
+			catch (Exception exception)
+			{
+				LOG.debug("RuneGlass local storage attempt {} failed", attempt + 1);
+			}
+		}
+		return null;
+	}
+
+	private void storageOpened(Object request, Filepath directory)
+	{
+		if (request != storageRequest)
+		{
+			return;
+		}
+		storageDirectory = directory;
+		storageSettled = true;
+		if (directory != null)
+		{
+			dropClient = DropClient.create(httpClient, gson, executor, directory.joinSegment("drops-v1"), new DropClient.Listener()
 			{
 				@Override public void onStatus(String status)
 				{
@@ -186,17 +259,18 @@ public class RuneGlassPlugin extends Plugin
 						? SnapshotClient.Failure.BINDING_MISMATCH : SnapshotClient.Failure.INVALID_CONNECTION));
 				}
 			});
-		if (!config.syncEnabled() || !config.dropSyncEnabled()) dropClient.discardAll();
-		else panel.showDropStatus("Drop sync enabled. Log in and pair this profile; Loot Tracker must be enabled.");
-		navigationButton = NavigationButton.builder()
-			.tooltip("RuneGlass Sync")
-			.icon(createNavigationIcon())
-			.priority(8)
-			.panel(panel)
-			.build();
-		clientToolbar.addNavigation(navigationButton);
-
-		LOG.debug("RuneGlass started");
+		}
+		if (!config.syncEnabled() || !config.dropSyncEnabled())
+		{
+			if (dropClient != null)
+			{
+				dropClient.discardAll();
+			}
+		}
+		else if (directory == null)
+		{
+			showDropStorageUnavailable();
+		}
 		if (config.syncEnabled() && client.getGameState() == GameState.LOGGED_IN)
 		{
 			startSession();
@@ -204,9 +278,20 @@ public class RuneGlassPlugin extends Plugin
 		refreshPairingPanel();
 	}
 
+	private void showDropStorageUnavailable()
+	{
+		RuneGlassPanel currentPanel = panel;
+		if (currentPanel != null)
+		{
+			currentPanel.showDropStatus("Drops paused: local storage could not be opened. No new drops are saved.");
+		}
+	}
+
 	@Override
 	protected void shutDown()
 	{
+		storageRequest = null;
+		storageSettled = false;
 		finishSession(SnapshotReason.LOGOUT_FLUSH);
 		if (pairingClient != null)
 		{
@@ -244,6 +329,7 @@ public class RuneGlassPlugin extends Plugin
 		appearanceClient = null;
 		connectionStateStore = null;
 		dropClient = null;
+		storageDirectory = null;
 		syncSessionId = null;
 		latestSnapshot = null;
 		activeCredentials = null;
@@ -300,7 +386,7 @@ public class RuneGlassPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
-		if (!config.syncEnabled())
+		if (!config.syncEnabled() || !storageSettled)
 		{
 			return;
 		}
@@ -367,6 +453,10 @@ public class RuneGlassPlugin extends Plugin
 			{
 				if (!config.syncEnabled() || !config.dropSyncEnabled()) dropClient.discardAll();
 				else connectDropTransport();
+			}
+			else if (storageSettled && config.syncEnabled() && config.dropSyncEnabled())
+			{
+				showDropStorageUnavailable();
 			}
 			return;
 		}
@@ -477,6 +567,10 @@ public class RuneGlassPlugin extends Plugin
 
 	private void startSession()
 	{
+		if (!storageSettled)
+		{
+			return;
+		}
 		if (dropClient != null) dropClient.pause();
 		discardQuestCapture();
 		session.start();
@@ -505,13 +599,14 @@ public class RuneGlassPlugin extends Plugin
 		}
 		activeProfileKey = configManager.getRSProfileKey();
 		connectionStateStore = null;
-		if (activeProfileKey != null)
+		Filepath directory = storageDirectory;
+		if (activeProfileKey != null && directory != null)
 		{
 			configManager.unsetRSProfileConfiguration(
 				RuneGlassConfig.GROUP,
 				ConnectionStateStore.LEGACY_CONFIG_KEY);
 			connectionStateStore = new ConnectionStateStore(
-				RuneLite.RUNELITE_DIR.toPath().resolve("runeglass").resolve("profiles"),
+				directory.joinSegment("profiles"),
 				activeProfileKey,
 				gson);
 			ConnectionStateStore store = connectionStateStore;
@@ -1197,9 +1292,15 @@ public class RuneGlassPlugin extends Plugin
 		if (currentClient == null
 			|| currentPanel == null
 			|| !config.syncEnabled()
-			|| client.getGameState() != GameState.LOGGED_IN)
+			|| client.getGameState() != GameState.LOGGED_IN
+			|| !storageSettled)
 		{
 			refreshPairingPanel();
+			return;
+		}
+		if (connectionStateStore == null)
+		{
+			currentPanel.showFailure(PairingClient.Failure.TEMPORARILY_UNAVAILABLE);
 			return;
 		}
 
@@ -1288,9 +1389,11 @@ public class RuneGlassPlugin extends Plugin
 		SnapshotClient currentSnapshotClient = snapshotClient;
 		RuneGlassPanel currentPanel = panel;
 		UUID sessionId = syncSessionId;
+		Filepath directory = storageDirectory;
 		if (currentSnapshotClient == null
 			|| currentPanel == null
 			|| sessionId == null
+			|| directory == null
 			|| activeCredentials == null
 			|| !activeCredentials.sameConnection(credentials)
 			|| client.getGameState() != GameState.LOGGED_IN)
@@ -1310,9 +1413,7 @@ public class RuneGlassPlugin extends Plugin
 			return;
 		}
 
-		Path queueDirectory = RuneLite.RUNELITE_DIR.toPath()
-			.resolve("runeglass")
-			.resolve(credentials.getConnectionId());
+		Filepath queueDirectory = directory.joinSegment(credentials.getConnectionId());
 		connectBirdHouseTransport(credentials, context);
 		connectQuestTransport(credentials, context);
 		connectFarmingPatchTransport(credentials, context);

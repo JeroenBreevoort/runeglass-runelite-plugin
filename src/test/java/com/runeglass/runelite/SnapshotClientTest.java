@@ -65,7 +65,7 @@ public class SnapshotClientTest
 		client = client(server.url("/"));
 		queueDirectory = temporaryFolder.newFolder("queue").toPath();
 		queue = new DurableSnapshotQueue(
-			queueDirectory,
+			TestStorage.rooted(queueDirectory),
 			new Gson(),
 			Clock.fixed(CAPTURED_AT, ZoneOffset.UTC));
 	}
@@ -368,7 +368,7 @@ public class SnapshotClientTest
 		client.cancel();
 		client = client(server.url("/"));
 		queue = new DurableSnapshotQueue(
-			queueDirectory,
+			TestStorage.rooted(queueDirectory),
 			new Gson(),
 			Clock.fixed(CAPTURED_AT, ZoneOffset.UTC));
 		server.enqueue(accepted("1"));

@@ -7,7 +7,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -15,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.client.util.Filepath;
 import net.runelite.http.api.loottracker.LootRecordType;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.Dispatcher;
@@ -36,21 +42,20 @@ public class DropClientTest
 	private MockWebServer server;
 	private FastScheduler executor;
 	private DropClient transport;
+	private Filepath storage;
 	private Path root;
 	private final List<String> statuses = new CopyOnWriteArrayList<>();
+	private final BlockingQueue<String> progress = new LinkedBlockingQueue<>();
 	private final AtomicInteger invalid = new AtomicInteger();
 	private final PairingClient.Credentials credentials = new PairingClient.Credentials("connection", "r".repeat(43));
 
 	@Before public void setUp() throws Exception
 	{
-		root = temporary.newFolder().toPath();
+		storage = TestStorage.rooted(temporary.newFolder().toPath()).joinSegment("drops-v1");
+		root = TestStorage.path(storage);
 		server = new MockWebServer(); server.start();
 		executor = new FastScheduler();
-		transport = new DropClient(new OkHttpClient(), gson, executor, server.url("/runelite/v1/drops"), root, new DropClient.Listener()
-		{
-			@Override public void onStatus(String status) { statuses.add(status); }
-			@Override public void onInvalidConnection(PairingClient.Credentials ignored, boolean mismatch) { invalid.incrementAndGet(); }
-		});
+		transport = transport(storage);
 	}
 
 	@After public void tearDown() throws Exception
@@ -119,13 +124,13 @@ public class DropClientTest
 		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
 		transport.connect(credentials, new SyncContext(java.util.UUID.randomUUID().toString(), "Fixture", "regular", "standard", "1.2.0", "1.13.1", 231));
 		RecordedRequest next = take();
-		assertEquals(first.getBody().readUtf8(), next.getBody().readUtf8());
+		assertEquals(first.getBody().clone().readUtf8(), next.getBody().clone().readUtf8());
 		await(() -> queueSize("connection") == 0);
 	}
 
 	@Test public void partialAcknowledgementOnlyRemovesConfirmedBatchIds() throws Exception
 	{
-		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
+		DurableDropQueue queue = new DurableDropQueue(storage, "connection", gson);
 		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
 		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
 		server.setDispatcher(new Dispatcher()
@@ -133,9 +138,9 @@ public class DropClientTest
 			@Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, true); }
 		});
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
-		JsonObject first = gson.fromJson(take().getBody().readUtf8(), JsonObject.class);
+		JsonObject first = gson.fromJson(take().getBody().clone().readUtf8(), JsonObject.class);
 		assertEquals(2, first.getAsJsonArray("events").size());
-		JsonObject second = gson.fromJson(take().getBody().readUtf8(), JsonObject.class);
+		JsonObject second = gson.fromJson(take().getBody().clone().readUtf8(), JsonObject.class);
 		assertEquals(1, second.getAsJsonArray("events").size());
 		assertEquals(first.getAsJsonArray("events").get(1), second.getAsJsonArray("events").get(0));
 		await(() -> queueSize("connection") == 0);
@@ -153,7 +158,7 @@ public class DropClientTest
 
 	@Test public void optOutCancelsInFlightAndPurgesInactiveConnections() throws Exception
 	{
-		new DurableDropQueue(root, "inactive", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "inactive"));
+		new DurableDropQueue(storage, "inactive", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "inactive"));
 		server.setDispatcher(new Dispatcher()
 		{
 			@Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false).setBodyDelay(300, TimeUnit.MILLISECONDS); }
@@ -191,7 +196,7 @@ public class DropClientTest
 
 	@Test public void permanentBatchFailureIsolatesOffenderAndSyncsHealthyEvent() throws Exception
 	{
-		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
+		DurableDropQueue queue = new DurableDropQueue(storage, "connection", gson);
 		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
 		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
 		String rejected = queue.batch(false).get(0).id();
@@ -210,17 +215,14 @@ public class DropClientTest
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
 		take(); take(); take();
 		await(() -> queueSize("connection") == 0);
-		assertTrue(new DurableDropQueue(root, "connection", gson).hasDamagedRecords());
-		assertEquals(1, Files.list(root.resolve("connection")).count());
+		assertTrue(new DurableDropQueue(storage, "connection", gson).hasDamagedRecords());
+		try (java.util.stream.Stream<Path> files = Files.list(root.resolve("connection"))) { assertEquals(1, files.count()); }
 	}
 
 	@Test public void profileChangeDuringQueuedPersistenceCannotRebindOldEvents() throws Exception
 	{
-		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
-		executor.execute(() ->
-		{
-			try { release.await(); } catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
-		});
+		CountDownLatch release = new CountDownLatch(1);
+		Future<Boolean> persistenceHeld = executor.submit((Callable<Boolean>) () -> release.await(3, TimeUnit.SECONDS));
 		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
 		transport.publish(DropCaptureTest.drop());
@@ -228,8 +230,10 @@ public class DropClientTest
 		PairingClient.Credentials next = new PairingClient.Credentials("next_connection", "s".repeat(43));
 		transport.connect(next, new SyncContext(java.util.UUID.randomUUID().toString(), "Second", "regular", "standard", "1.2.0", "1.13.1", 231));
 		transport.publish(DropCaptureTest.drop());
+		assertFalse(persistenceHeld.isDone());
 		release.countDown();
-		JsonObject uploaded = gson.fromJson(take().getBody().readUtf8(), JsonObject.class);
+		assertTrue(persistenceHeld.get(3, TimeUnit.SECONDS));
+		JsonObject uploaded = gson.fromJson(take().getBody().clone().readUtf8(), JsonObject.class);
 		assertEquals("next_connection", uploaded.get("connectionId").getAsString());
 		assertEquals("Second", uploaded.getAsJsonObject("character").get("displayName").getAsString());
 		await(() -> queueSize("connection") == 1 && queueSize("next_connection") == 0);
@@ -238,10 +242,10 @@ public class DropClientTest
 
 	@Test public void unfinishedOptOutMarkerPreventsOldQueueResumptionAfterRestart() throws Exception
 	{
-		new DurableDropQueue(root, "connection", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
-		DurableDropQueue.markDiscard(root);
+		new DurableDropQueue(storage, "connection", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		DurableDropQueue.markDiscard(storage);
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
-		await(() -> !Files.exists(DurableDropQueue.discardMarker(root)) && queueSize("connection") == 0);
+		await(() -> !Files.exists(TestStorage.path(DurableDropQueue.discardMarker(storage))) && queueSize("connection") == 0);
 		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
 	}
 
@@ -280,14 +284,35 @@ public class DropClientTest
 
 	@Test public void connectionCleanupCannotClearAnUnfinishedGlobalOptOut() throws Exception
 	{
-		new DurableDropQueue(root, "connection", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
-		Files.createDirectory(DurableDropQueue.discardMarker(root));
-		DurableDropQueue.markDiscard(root.resolve("connection"));
+		new DurableDropQueue(storage, "connection", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		Files.createDirectory(TestStorage.path(DurableDropQueue.discardMarker(storage)));
+		DurableDropQueue.markDiscard(storage.joinSegment("connection"));
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
 		await(() -> statuses.stream().anyMatch(status -> status.contains("local deletion failed")));
 		assertFalse(transport.isConnected());
 		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
-		assertTrue(Files.exists(DurableDropQueue.discardMarker(root)));
+		assertTrue(Files.exists(TestStorage.path(DurableDropQueue.discardMarker(storage))));
+	}
+
+	@Test public void neverEnabledOptOutCreatesNoPluginFolderOrMarker() throws Exception
+	{
+		Path plugin = temporary.getRoot().toPath().resolve("plugin-data").resolve("runeglass");
+		DropClient fresh = transport(TestStorage.rooted(plugin).joinSegment("drops-v1"));
+		fresh.discardAll();
+		fresh.discardConnection("connection");
+		await(() -> statuses.stream().filter(status -> status.startsWith("Drop sync is off.")).count() == 2);
+		assertFalse(Files.exists(plugin));
+		assertFalse(Files.exists(plugin.getParent()));
+		assertEquals(0, server.getRequestCount());
+	}
+
+	@Test public void optOutAfterEarlierUseStillPurgesThroughTheDurableMarker() throws Exception
+	{
+		new DurableDropQueue(storage, "connection", gson).append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
+		transport.discardAll();
+		await(() -> statuses.stream().anyMatch(status -> status.startsWith("Drop sync is off.")));
+		assertFalse(Files.exists(root));
+		try (java.util.stream.Stream<Path> files = Files.list(root.getParent())) { assertEquals(0, files.count()); }
 	}
 
 	private static void setField(RuneGlassPlugin plugin, String name, Object value) throws Exception
@@ -324,15 +349,27 @@ public class DropClientTest
 		try
 		{
 			if (!Files.exists(root.resolve(connectionId))) return 0;
-			return new DurableDropQueue(root, connectionId, gson).size();
+			return new DurableDropQueue(storage, connectionId, gson).size();
 		}
 		catch (Exception exception) { return -1; }
 	}
-	private static void await(BooleanSupplier condition) throws InterruptedException
+	private DropClient transport(Filepath dropRoot)
+	{
+		return new DropClient(new OkHttpClient(), gson, executor, server.url("/runelite/v1/drops"), dropRoot, new DropClient.Listener()
+		{
+			@Override public void onStatus(String status) { statuses.add(status); progress.add(status); }
+			@Override public void onInvalidConnection(PairingClient.Credentials ignored, boolean mismatch) { invalid.incrementAndGet(); progress.add("invalid"); }
+		});
+	}
+	private void await(BooleanSupplier condition) throws InterruptedException
 	{
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-		while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
-		assertTrue(condition.getAsBoolean());
+		while (!condition.getAsBoolean())
+		{
+			long remaining = deadline - System.nanoTime();
+			assertTrue("Drop transport made no further progress: " + statuses, remaining > 0
+				&& progress.poll(remaining, TimeUnit.NANOSECONDS) != null);
+		}
 	}
 	private static final class FastScheduler extends ScheduledThreadPoolExecutor
 	{

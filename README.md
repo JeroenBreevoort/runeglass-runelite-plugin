@@ -1,9 +1,9 @@
 # RuneGlass
 
 RuneGlass is an opt-in, read-only RuneLite plugin that syncs the logged-in
-character's skills, XP, separately enabled quests, bird house and farming timers, and
-optional drop history and a private character appearance snapshot
-to the RuneGlass companion app.
+character's skills and XP to the RuneGlass companion app, along with separately
+enabled quests, bird house and farming timers, drop history, and a private
+character appearance snapshot.
 
 The plugin uses a fixed RuneGlass HTTPS destination and never accepts a
 user-configurable endpoint.
@@ -11,9 +11,10 @@ user-configurable endpoint.
 ## Data and consent
 
 The main sync toggle shows the data-sharing warning. Bird house timers, farming
-timers, quests, drop history, and character appearance each have a separate toggle, all off by default,
-with details in their descriptions and no repeated warning. Turning off the main
-sync toggle stops all sharing.
+timers, quests, drop history, and character appearance each have a separate
+toggle, all off by default, with details in their descriptions. Enabling drop
+history also shows its own sharing warning, including for previously paired
+users. Turning off the main sync toggle stops all sharing.
 
 Sync is disabled by default. After the user pairs RuneLite with an existing
 RuneGlass character and enables sync, the plugin sends:
@@ -29,6 +30,8 @@ RuneGlass character and enables sync, the plugin sends:
 - when separately enabled, the semantic state, crop, and growth stage of all
   RuneLite time-tracking plant patches while their region is loaded, with an
   estimated ready time for actively growing crops. Compost bins are excluded.
+- when separately enabled, supported drop sources, capture times, reward-roll
+  counts, item IDs, names, quantities, and available captured value estimates; and
 - when separately enabled, the current character's equipped item identifiers,
   body colours, gender presentation, low-poly composite model geometry, and
   render attributes (face colours, transparency, render priorities, texture
@@ -42,9 +45,18 @@ packets, or gameplay inputs.
 
 Pairing uses a short-lived code entered in the signed-in RuneGlass app. The
 resulting random, revocable connection credential cannot authenticate to
-Jagex or read RuneGlass account data. It is stored atomically in an owner-only
-local file derived from the matching RuneLite profile, so another logged-in
+Jagex or read RuneGlass account data. It is stored atomically in a local file
+derived from the matching RuneLite profile, so another logged-in
 profile cannot reuse it and RuneLite's configuration logger never receives it.
+New credential and queue files use owner-only permissions on macOS and Linux;
+Windows access follows the user profile's filesystem permissions.
+
+Storage uses RuneLite's Filepath API under `.runelite/plugin-data/runeglass`.
+RuneLite automatically moves the previous `.runelite/runeglass` directory on
+first startup, preserving pairings and queued data. Close other RuneLite clients
+before upgrading: an older client still running can recreate the old directory,
+which is not merged afterward. Rolling back to an older plugin does not move
+the data back.
 
 Unsent snapshots are written atomically below RuneLite's own data directory and
 retried in order. The queue is capped at 5 MiB and seven days. Disabling sync,
@@ -88,9 +100,9 @@ of Amascut. An event is kept only when at least one merged item stack has a
 captured value of **50,000 GP or more**, or matches a curated notable reward for
 that exact source type, source name and observed item ID. Distinct item stacks
 are not added together to meet the threshold. Player loot, unknown/unreviewed
-events and other-plugin injections are excluded. Coverage requires both plugins
-and consent to be active; it does
-not reconstruct past drops or guarantee pet/collection-log coverage.
+events and loot marked by Loot Tracker as originating from another plugin are
+excluded. Coverage requires both plugins and consent to be active; it does not
+reconstruct past drops or guarantee pet/collection-log coverage.
 
 Each event sends capture time, source, reward-roll count, item IDs/names/quantities
 and available frozen GE estimates. Reward-roll count is not kill count. Coins

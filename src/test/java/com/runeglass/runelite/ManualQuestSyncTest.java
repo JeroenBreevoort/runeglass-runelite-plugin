@@ -136,6 +136,7 @@ public class ManualQuestSyncTest
 		setField(plugin, "activeCredentials", credentials);
 		setField(plugin, "snapshotClient", snapshotClient);
 		setField(plugin, "questClient", transport);
+		setField(plugin, "storageSettled", true);
 		reducer = (QuestSnapshotReducer) getField(plugin, "questReducer");
 		session = (SkillsSyncSession) getField(plugin, "session");
 		session.start();

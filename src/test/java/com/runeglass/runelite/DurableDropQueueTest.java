@@ -8,10 +8,14 @@ import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import net.runelite.client.util.Filepath;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import static org.junit.Assert.*;
+import static org.junit.Assume.assumeTrue;
 
 public class DurableDropQueueTest
 {
@@ -20,7 +24,7 @@ public class DurableDropQueueTest
 
 	@Test public void restartRetainsImmutableIdsContentAndCaptureSession() throws Exception
 	{
-		Path root = temporary.newFolder().toPath();
+		Filepath root = root();
 		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
 		JsonObject first = DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection");
 		JsonObject second = DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection");
@@ -37,10 +41,10 @@ public class DurableDropQueueTest
 
 	@Test public void damagedRecordDoesNotDestroyOrBlockHealthyRecords() throws Exception
 	{
-		Path root = temporary.newFolder().toPath();
+		Filepath root = root();
 		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
 		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
-		Path corrupted = root.resolve("connection").resolve("bad.json");
+		Path corrupted = TestStorage.path(root).resolve("connection").resolve("bad.json");
 		Files.writeString(corrupted, "broken");
 		DurableDropQueue restored = new DurableDropQueue(root, "connection", gson);
 		assertTrue(restored.hasDamagedRecords());
@@ -48,12 +52,12 @@ public class DurableDropQueueTest
 		assertTrue(Files.exists(corrupted));
 		restored.block(restored.batch(false).get(0));
 		assertEquals(0, new DurableDropQueue(root, "connection", gson).size());
-		assertEquals(2, Files.list(root.resolve("connection")).count());
+		assertEquals(2, names(TestStorage.path(root).resolve("connection")).size());
 	}
 
 	@Test public void marketIdSurvivesCapturePersistenceRestartBatchAndAcknowledgementWithLegacyItems() throws Exception
 	{
-		Path root = temporary.newFolder().toPath();
+		Filepath root = root();
 		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
 		JsonObject coins = DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection");
 		JsonObject legacy = DropCaptureTest.notedDrop(123).envelope(DropCaptureTest.CONTEXT, "connection");
@@ -79,7 +83,7 @@ public class DurableDropQueueTest
 
 	@Test public void rejectsInvalidMarketIdsAndUnexpectedFieldsBeforePersistence() throws Exception
 	{
-		DurableDropQueue queue = new DurableDropQueue(temporary.newFolder().toPath(), "connection", gson);
+		DurableDropQueue queue = new DurableDropQueue(root(), "connection", gson);
 		for (String raw : List.of("0", "-1", "995", "2147483648", "1.5", "null", "true", "\"22124\"", "{}", "[]"))
 		{
 			JsonObject body = DropCaptureTest.notedDrop(0).envelope(DropCaptureTest.CONTEXT, "connection");
@@ -112,7 +116,7 @@ public class DurableDropQueueTest
 
 	@Test public void boundedBatchSplitsByCountAndUtf8BytesWithoutDroppingEvents() throws Exception
 	{
-		Path root = temporary.newFolder().toPath();
+		Filepath root = root();
 		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
 		for (int i = 0; i < 23; i++) queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
 		assertEquals(20, queue.batch(false).size());
@@ -145,10 +149,10 @@ public class DurableDropQueueTest
 
 	@Test public void queueCapacityKeepsPreviouslySavedEvents() throws Exception
 	{
-		Path root = temporary.newFolder().toPath();
+		Filepath root = root();
 		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
 		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
-		Files.write(root.resolve("connection").resolve("blocked.bin"), new byte[(int) DurableDropQueue.MAX_BYTES]);
+		Files.write(TestStorage.path(root).resolve("connection").resolve("blocked.bin"), new byte[(int) DurableDropQueue.MAX_BYTES]);
 		DurableDropQueue full = new DurableDropQueue(root, "connection", gson);
 		try { full.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection")); fail(); }
 		catch (DurableDropQueue.CapacityException expected) { assertEquals(1, full.size()); }
@@ -156,17 +160,54 @@ public class DurableDropQueueTest
 	}
 	@Test public void failedAtomicWritePreservesPreviouslyCommittedDrop() throws Exception
 	{
-		Path root = temporary.newFolder().toPath();
+		Filepath root = root();
 		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
 		queue.append(DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection"));
 		JsonObject next = DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection");
 		String nextId = DropCaptureTest.event(next).get("eventId").getAsString();
-		Files.createDirectory(root.resolve("connection").resolve("00000000000000000002-" + nextId + ".json.tmp"));
+		Path directory = TestStorage.path(root).resolve("connection");
+		Path blocker = directory.resolve("00000000000000000002-" + nextId + ".json");
+		Files.createDirectories(blocker.resolve("occupied"));
 		try { queue.append(next); fail(); }
 		catch (java.io.IOException expected) { assertEquals(1, queue.size()); }
+		assertTrue(names(directory).stream().noneMatch(name -> name.endsWith(".tmp")));
+		TestStorage.rooted(blocker).deleteRecursively();
 		DurableDropQueue restored = new DurableDropQueue(root, "connection", gson);
 		assertEquals(1, restored.size());
 		assertFalse(restored.hasDamagedRecords());
+	}
+
+	@Test public void committedRecordsAreOwnerOnlyAndInterruptedWritesStayVisibleAsDamage() throws Exception
+	{
+		Filepath root = root();
+		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
+		JsonObject body = DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection");
+		queue.append(body);
+		Path directory = TestStorage.path(root).resolve("connection");
+		List<String> committed = names(directory);
+		assertEquals(1, committed.size());
+		assertTrue(committed.get(0).matches("[0-9]{20}-[a-f0-9-]{36}\\.json"));
+		assertEquals(List.of("connection"), names(TestStorage.path(root)));
+		Files.writeString(directory.resolve(committed.get(0) + ".4812.tmp"), "partial");
+		DurableDropQueue restored = new DurableDropQueue(root, "connection", gson);
+		assertTrue(restored.hasDamagedRecords());
+		assertEquals(body, restored.batch(false).get(0).body);
+		assumeTrue(TestStorage.posix());
+		assertEquals("rw-------", TestStorage.permissions(directory.resolve(committed.get(0))));
+		assertEquals("rwx------", TestStorage.permissions(directory));
+	}
+
+	private Filepath root() throws Exception
+	{
+		return TestStorage.rooted(temporary.newFolder().toPath());
+	}
+
+	private static List<String> names(Path directory) throws Exception
+	{
+		try (Stream<Path> files = Files.list(directory))
+		{
+			return files.map(file -> file.getFileName().toString()).sorted().collect(Collectors.toList());
+		}
 	}
 
 }
