@@ -14,7 +14,9 @@ The main sync toggle shows the data-sharing warning. Bird house timers, farming
 timers, quests, drop history, and character appearance each have a separate
 toggle, all off by default, with details in their descriptions. Enabling drop
 history also shows its own sharing warning, including for previously paired
-users. Turning off the main sync toggle stops all sharing.
+users. **Share kill counts with drops** is a further default-off toggle with its
+own warning when enabled; existing drop consent never turns it on. Turning off
+the main sync toggle stops all sharing.
 
 Sync is disabled by default. After the user pairs RuneLite with an existing
 RuneGlass character and enables sync, the plugin sends:
@@ -62,7 +64,9 @@ Unsent snapshots are written atomically below RuneLite's own data directory and
 retried in order. The queue is capped at 5 MiB and seven days. Disabling sync,
 forgetting the client, or receiving a terminal authorization error clears the
 credential and queued snapshots. The plugin never automates input or reads
-other players, chat, launcher sessions, or Jagex credentials.
+other players, private/player chat, launcher sessions, or Jagex credentials.
+Game messages are examined locally only with the separate count-sharing opt-in;
+the raw messages are never stored or uploaded.
 
 Timer observations use a separate in-memory latest-state retry path and are
 never added to the durable skills queue. Turning off either timer sync drops its
@@ -144,3 +148,40 @@ The plugin requires Java 11.
 
 
 JDK 17 can also build and run the plugin. Compiled classes target Java 11.
+
+### Drop counts and collection-log evidence
+
+Enable **Share kill counts with drops** separately to share the count shown in
+game with a supported reward and its activity: boss kill counts, raid completions
+including mode, Barrows chests and clue caskets, plus whether the collection log
+reported the item as new and whether counts were missed between drops. It only
+works while **Sync drop history**, master sync and a paired capture session are
+active. Game messages are read locally only to find this evidence and are never
+uploaded or stored. With the option off, there is no count/new-item chat
+subscription, collection-log setting read or continuity read/write, and all
+optional count-extension fields are absent from drops. Collection-log chat
+settings are recorded as enabled, disabled or unknown. Count coverage follows the
+app's boss, raid-mode and clue-tier registry independently of the rate catalogue.
+The backend selects prior recorded copies and assesses luck; the plugin never
+computes a luck score. Missing or ambiguous counts remain absent.
+
+Continuity persists across logout/restart in a profile-scoped file beside the
+connection's drop queue while this opt-in is enabled. Turning it off immediately
+stops collection, cancels requests, deletes continuity and strips evidence from
+unsent drops across local profiles, including blocked records. The drops and their
+IDs are kept. Buffered drops are saved without evidence. Failed cleanup blocks
+uploads and is retried before queues resume; already synced history remains until
+deleted in RuneGlass. Master/drop opt-out and forget/purge still delete their
+pending drops and continuity. Re-enabling starts a new continuity stream.
+
+The plugin has no persisted per-category consent versions. The new default-off
+key is the upgrade boundary; existing users must enable it explicitly. The drop
+wire `consentVersion: 1` and legacy fingerprints remain unchanged.
+
+While opted in, low-value outcomes advance continuity without uploading their rewards. The correlation buffer normally
+adds about six seconds before persistence and can lose pending observations on a
+crash. See [drop-count testing](docs/development/drop-count-testing.md) for the
+exact storage/evidence model, known source limits, upstream citations and the
+required human in-game checklist. All rated and unrated catalogue items are
+retained even without a price; regenerate both Java mirrors after catalogue or
+counter changes with the root `npm run runelite:policy:generate` command.

@@ -19,6 +19,8 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import net.runelite.api.Client;
+import net.runelite.api.ChatMessageType;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.GameState;
 import net.runelite.api.Player;
 import net.runelite.api.PlayerComposition;
@@ -33,6 +35,7 @@ import net.runelite.api.events.VarbitChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.plugins.Plugin;
@@ -99,6 +102,12 @@ public class RuneGlassPlugin extends Plugin
 	@Inject
 	private ConfigManager configManager;
 
+	@Inject
+	private EventBus eventBus;
+
+	private final DropChatListener dropChatListener = new DropChatListener();
+	private boolean dropChatSubscribed;
+
 	private final SkillsSyncSession session = new SkillsSyncSession();
 	private final LoginBaselineGate baselineGate = new LoginBaselineGate();
 	private final BirdHouseSnapshotReducer birdHouseReducer = new BirdHouseSnapshotReducer();
@@ -116,6 +125,8 @@ public class RuneGlassPlugin extends Plugin
 	private volatile boolean storageSettled;
 	private volatile Filepath storageDirectory;
 	private final DropCapture dropCapture = new DropCapture();
+	private final DropCorrelator dropCorrelator = new DropCorrelator();
+	private final DropGameContext dropGameContext = new DropGameContext();
 	private volatile DropCaptureObserver dropCaptureObserver;
 	private RuneGlassPanel panel;
 	private NavigationButton navigationButton;
@@ -267,6 +278,10 @@ public class RuneGlassPlugin extends Plugin
 				dropClient.discardAll();
 			}
 		}
+		else if (dropClient != null && !config.dropCountSyncEnabled())
+		{
+			dropClient.revokeCountSharing();
+		}
 		else if (directory == null)
 		{
 			showDropStorageUnavailable();
@@ -402,6 +417,7 @@ public class RuneGlassPlugin extends Plugin
 			captureCurrentClientState();
 		}
 
+		advanceDropEvidence();
 		session.poll(Instant.now()).ifPresent(this::publishLocally);
 		captureQuests(false);
 		captureBirdHouses();
@@ -428,6 +444,7 @@ public class RuneGlassPlugin extends Plugin
 	@Subscribe
 	public void onVarbitChanged(VarbitChanged event)
 	{
+		if (canCaptureDropCounts()) updateDropContext();
 		if (config.syncEnabled() && config.questSyncEnabled() && session.isActive())
 		{
 			questReducer.markDirty();
@@ -442,16 +459,37 @@ public class RuneGlassPlugin extends Plugin
 			return;
 		}
 		String key = event.getKey();
+		if (("dropCountSyncEnabled".equals(key) && !config.dropCountSyncEnabled())
+			|| ("dropSyncEnabled".equals(key) && !config.dropSyncEnabled())
+			|| ("syncEnabled".equals(key) && !config.syncEnabled()))
+		{
+			stopDropChat();
+			if (dropClient != null)
+			{
+				if ("dropCountSyncEnabled".equals(key)) dropClient.revokeCountSharing();
+				else dropClient.discardAll();
+			}
+		}
 		clientThread.invokeLater(() -> handleConfigChanged(key));
 	}
 
 	private void handleConfigChanged(String key)
 	{
+		if ("dropCountSyncEnabled".equals(key))
+		{
+			stopDropChat();
+			if (dropClient != null && !config.dropCountSyncEnabled()) dropClient.revokeCountSharing();
+			connectDropTransport();
+			dropCorrelator.flush(this::publishDropWithoutCounts);
+			dropGameContext.clear();
+			updateDropChatSubscription();
+			return;
+		}
 		if ("dropSyncEnabled".equals(key))
 		{
 			if (dropClient != null)
 			{
-				if (!config.syncEnabled() || !config.dropSyncEnabled()) dropClient.discardAll();
+				if (!config.syncEnabled() || !config.dropSyncEnabled()) { clearDropEvidence(); dropClient.discardAll(); }
 				else connectDropTransport();
 			}
 			else if (storageSettled && config.syncEnabled() && config.dropSyncEnabled())
@@ -524,6 +562,7 @@ public class RuneGlassPlugin extends Plugin
 
 		if (!config.syncEnabled())
 		{
+			clearDropEvidence();
 			if (dropClient != null) dropClient.discardAll();
 			session.cancel();
 			discardQuestCapture();
@@ -571,6 +610,7 @@ public class RuneGlassPlugin extends Plugin
 		{
 			return;
 		}
+		flushDropEvidence();
 		if (dropClient != null) dropClient.pause();
 		discardQuestCapture();
 		session.start();
@@ -1200,6 +1240,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void finishSession(SnapshotReason reason)
 	{
+		flushDropEvidence();
 		if (dropClient != null) dropClient.pause();
 		discardQuestCapture();
 		Optional<SkillsSnapshot> finalSnapshot = session.stop(Instant.now(), reason);
@@ -1353,6 +1394,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private void stopPairing()
 	{
+		clearDropEvidence();
 		if (dropClient != null && activeCredentials != null) dropClient.discardConnection(activeCredentials.getConnectionId());
 		discardQuestCapture();
 		if (pairingClient != null)
@@ -1419,7 +1461,11 @@ public class RuneGlassPlugin extends Plugin
 		connectFarmingPatchTransport(credentials, context);
 		connectAppearanceTransport(credentials, context);
 		if (dropClient != null && config.dropSyncEnabled()
-			&& RuneScapeProfileType.getCurrent(client) == RuneScapeProfileType.STANDARD) dropClient.connect(credentials, context);
+			&& RuneScapeProfileType.getCurrent(client) == RuneScapeProfileType.STANDARD)
+		{
+			dropClient.connect(credentials, context, activeProfileKey, config.dropCountSyncEnabled());
+			updateDropChatSubscription();
+		}
 		try
 		{
 			executor.execute(() ->
@@ -1560,6 +1606,7 @@ public class RuneGlassPlugin extends Plugin
 		}
 		if (dropClient != null)
 		{
+			clearDropEvidence();
 			if (failure == SnapshotClient.Failure.INVALID_CONNECTION) dropClient.discardConnection(expectedCredentials.getConnectionId());
 			else dropClient.pause();
 		}
@@ -1657,7 +1704,9 @@ public class RuneGlassPlugin extends Plugin
 	public void onPluginChanged(PluginChanged event)
 	{
 		if (!(event.getPlugin() instanceof LootTrackerPlugin)) return;
+		if (!event.isLoaded()) flushDropEvidence();
 		lootTrackerRunning = event.isLoaded();
+		updateDropChatSubscription();
 		RuneGlassPanel currentPanel = panel;
 		if (currentPanel != null) currentPanel.showDropCaptureAvailable(lootTrackerRunning);
 	}
@@ -1678,13 +1727,113 @@ public class RuneGlassPlugin extends Plugin
 		try
 		{
 			DropCaptureResult result = dropCapture.capture(event, itemManager, syncSessionId, Instant.now());
-			return result.event().map(drop -> result.submitted(currentClient.publish(drop))).orElse(result);
+			if (!config.dropCountSyncEnabled())
+			{
+				if (result.event().isPresent()) currentClient.publish(result.event().get());
+				else if (result.reason() == DropCaptureResult.Reason.INVALID_REWARD) currentClient.captureFailed();
+				return result;
+			}
+			String encounter = updateDropContext();
+			dropCorrelator.loot(result, client.getTickCount(), System.nanoTime(), encounter, this::publishCorrelatedDrop);
+			return result;
 		}
 		catch (RuntimeException exception)
 		{
+			flushDropEvidence();
 			currentClient.captureFailed();
 			return DropCaptureResult.invalid();
 		}
+	}
+
+	void onChatMessage(ChatMessage event)
+	{
+		if (!canCaptureDropCounts()) return;
+		if (event.getType() != ChatMessageType.GAMEMESSAGE && event.getType() != ChatMessageType.SPAM
+			&& event.getType() != ChatMessageType.MESBOX) return;
+		String encounter = updateDropContext();
+		long tick = client.getTickCount();
+		long nanos = System.nanoTime();
+		dropCorrelator.count(DropCountParser.parse(event.getMessage()), tick, nanos, encounter);
+		dropCorrelator.collection(DropCountParser.collectionItem(event.getMessage()), tick, nanos);
+	}
+
+	private final class DropChatListener
+	{
+		@Subscribe
+		public void onChatMessage(ChatMessage event)
+		{
+			RuneGlassPlugin.this.onChatMessage(event);
+		}
+	}
+
+	private boolean canCaptureDropCounts()
+	{
+		return dropClient != null && config.dropCountSyncEnabled() && dropCaptureBlocker(dropClient) == null;
+	}
+
+	private synchronized void updateDropChatSubscription()
+	{
+		if (!canCaptureDropCounts())
+		{
+			stopDropChat();
+			return;
+		}
+		if (!dropChatSubscribed)
+		{
+			eventBus.register(dropChatListener);
+			dropChatSubscribed = true;
+		}
+	}
+
+	private synchronized void stopDropChat()
+	{
+		if (dropChatSubscribed)
+		{
+			eventBus.unregister(dropChatListener);
+			dropChatSubscribed = false;
+		}
+	}
+
+	private String updateDropContext()
+	{
+		String encounter = dropGameContext.raidEncounter(client);
+		dropCorrelator.context(client.getTickCount(), DropGameContext.collectionLogSetting(client), encounter);
+		return encounter;
+	}
+
+	void advanceDropEvidence()
+	{
+		updateDropChatSubscription();
+		if (!canCaptureDropCounts()) return;
+		updateDropContext();
+		dropCorrelator.advance(client.getTickCount(), System.nanoTime(), this::publishCorrelatedDrop);
+	}
+
+	private void publishCorrelatedDrop(DropCorrelator.Completed completed)
+	{
+		if (dropClient == null || !config.syncEnabled() || !config.dropSyncEnabled()) return;
+		if (config.dropCountSyncEnabled()) dropClient.observe(completed);
+		else publishDropWithoutCounts(completed);
+	}
+
+	private void publishDropWithoutCounts(DropCorrelator.Completed completed)
+	{
+		if (dropClient == null || !config.syncEnabled() || !config.dropSyncEnabled()) return;
+		completed.result.event().ifPresent(event -> dropClient.publish(event.withoutCountEvidence()));
+	}
+
+	private void flushDropEvidence()
+	{
+		stopDropChat();
+		dropCorrelator.flush(this::publishCorrelatedDrop);
+		dropGameContext.clear();
+	}
+
+	private void clearDropEvidence()
+	{
+		stopDropChat();
+		dropCorrelator.clear();
+		dropGameContext.clear();
 	}
 
 	private DropCaptureResult.Reason dropCaptureBlocker(DropClient currentClient)
@@ -1718,7 +1867,11 @@ public class RuneGlassPlugin extends Plugin
 			|| RuneScapeProfileType.getCurrent(client) != RuneScapeProfileType.STANDARD
 			|| client.getGameState() != GameState.LOGGED_IN
 			|| needsProfileRestart(configManager.getRSProfileKey())) return;
-		try { dropClient.connect(activeCredentials, SyncContext.capture(client, syncSessionId)); }
+		try
+		{
+			dropClient.connect(activeCredentials, SyncContext.capture(client, syncSessionId), activeProfileKey, config.dropCountSyncEnabled());
+			updateDropChatSubscription();
+		}
 		catch (RuntimeException exception)
 		{
 			dropClient.pause();

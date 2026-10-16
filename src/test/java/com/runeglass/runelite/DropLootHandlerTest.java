@@ -32,6 +32,28 @@ public class DropLootHandlerTest
 		fixture.close();
 	}
 
+	@Test public void actualChatHandlerIgnoresPlayersAndCorrelatesGameFactsBeforeLocalSave() throws Exception
+	{
+		fixture.enableCounts();
+		fixture.eventBus.post(new net.runelite.api.events.ChatMessage(null, net.runelite.api.ChatMessageType.PUBLICCHAT,
+			"Other player", "Your Vorkath kill count is: 999.", null, 0));
+		fixture.eventBus.post(new net.runelite.api.events.ChatMessage(null, net.runelite.api.ChatMessageType.GAMEMESSAGE,
+			"", "Your Vorkath kill count is: 100.", null, 0));
+		LootReceived loot = loot("Vorkath", new ItemStack(21907, 1));
+		fixture.plugin.onLootReceived(loot);
+		fixture.plugin.onLootReceived(loot);
+		fixture.eventBus.post(new net.runelite.api.events.ChatMessage(null, net.runelite.api.ChatMessageType.GAMEMESSAGE,
+			"", "New item added to your collection log: Fixture item", null, 0));
+		fixture.drainTransport();
+		assertNull(fixture.uploads.poll(100, TimeUnit.MILLISECONDS));
+		JsonObject saved = fixture.takeUpload();
+		assertNotNull(saved);
+		assertEquals(100, saved.getAsJsonObject("sourceCount").get("value").getAsInt());
+		assertEquals("enabled", saved.get("collectionLog").getAsString());
+		assertTrue(saved.getAsJsonArray("items").get(0).getAsJsonObject().get("newCollectionLogSlot").getAsBoolean());
+		assertNull(fixture.uploads.poll(100, TimeUnit.MILLISECONDS));
+	}
+
 	@Test public void everyGuardReportsItsReasonWithoutReadingTheLoot() throws Exception
 	{
 		assertBlocked(DropCaptureResult.Reason.SYNC_OFF, () -> fixture.syncEnabled = false, () -> fixture.syncEnabled = true);
@@ -50,7 +72,7 @@ public class DropLootHandlerTest
 		assertBlocked(DropCaptureResult.Reason.PLUGIN_STOPPED, () -> set("dropClient", null), () -> set("dropClient", fixture.dropClient));
 		assertEquals(0, fixture.definitionReads.get());
 		assertNull(fixture.server.takeRequest(250, TimeUnit.MILLISECONDS));
-		assertEquals(DropCaptureResult.Reason.SUBMITTED_FOR_LOCAL_SAVE, fixture.plugin.handleLoot(coins(50_000)).reason());
+		assertEquals(DropCaptureResult.Reason.ELIGIBLE, fixture.plugin.handleLoot(coins(50_000)).reason());
 	}
 
 	@Test public void exactCoinBoundaryIsFilteredOrSubmittedThroughTheRealHandler() throws Exception
@@ -61,7 +83,7 @@ public class DropLootHandlerTest
 		assertFalse(low.event().isPresent());
 
 		DropCaptureResult kept = fixture.plugin.handleLoot(coins(50_000));
-		assertEquals(DropCaptureResult.Stage.SUBMITTED, kept.stage());
+		assertEquals(DropCaptureResult.Stage.ELIGIBLE, kept.stage());
 		JsonObject uploaded = fixture.takeUpload();
 		assertEquals(kept.event().get().eventId(), uploaded.get("eventId").getAsString());
 		assertEquals(50_000, uploaded.getAsJsonArray("items").get(0).getAsJsonObject().get("quantity").getAsInt());
@@ -71,7 +93,7 @@ public class DropLootHandlerTest
 	@Test public void notableUntradeableRewardStillRequiresTheExactSource() throws Exception
 	{
 		DropCaptureResult exact = fixture.plugin.handleLoot(loot("Vorkath", new ItemStack(21907, 1)));
-		assertEquals(DropCaptureResult.Reason.SUBMITTED_FOR_LOCAL_SAVE, exact.reason());
+		assertEquals(DropCaptureResult.Reason.ELIGIBLE, exact.reason());
 		assertTrue(exact.notable());
 		assertEquals("untradeable", fixture.takeUpload().getAsJsonArray("items").get(0).getAsJsonObject()
 			.getAsJsonObject("value").get("kind").getAsString());
@@ -121,9 +143,10 @@ public class DropLootHandlerTest
 		fixture.executor.shutdown();
 		assertTrue(fixture.executor.awaitTermination(3, TimeUnit.SECONDS));
 		DropCaptureResult refused = fixture.plugin.handleLoot(coins(50_000));
-		assertEquals(DropCaptureResult.Reason.LOCAL_SAVE_UNAVAILABLE, refused.reason());
-		assertEquals(DropCaptureResult.Stage.NOT_SUBMITTED, refused.stage());
+		assertEquals(DropCaptureResult.Reason.ELIGIBLE, refused.reason());
 		assertTrue(refused.event().isPresent());
+		assertNull(fixture.takeUpload());
+		assertTrue(fixture.statuses.stream().anyMatch(status -> status.contains("background storage is unavailable")));
 	}
 
 	private void assertBlocked(DropCaptureResult.Reason reason, Step block, Step restore) throws Exception

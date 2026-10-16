@@ -40,6 +40,7 @@ final class DurableDropQueue
 		{
 			for (Filepath path : files.filter(file -> !file.equals(directory)).sorted().collect(Collectors.toList()))
 			{
+				if (DropContinuityStore.FILE.equals(path.getFileName())) continue;
 				fileCount++;
 				long size = path.size();
 				bytes += size;
@@ -143,6 +144,45 @@ final class DurableDropQueue
 		if (root.exists()) root.deleteRecursively();
 	}
 
+	static Filepath countRevocationMarker(Filepath root)
+	{
+		return root.getParent().joinSegment(root.getFileName() + ".counts-revoked");
+	}
+
+	static void stripCountEvidence(Filepath root, Gson gson) throws IOException
+	{
+		Filepath marker = countRevocationMarker(root);
+		if (root.exists())
+		{
+			PrivateFiles.write(marker, marker.getFileName() + ".", new byte[]{1});
+			List<Filepath> files;
+			try (Stream<Filepath> paths = root.walk(2))
+			{
+				files = paths.filter(Filepath::isFile).collect(Collectors.toList());
+			}
+			for (Filepath path : files)
+			{
+				String name = path.getFileName();
+				if (name.equals(DropContinuityStore.FILE)
+					|| (name.startsWith(DropContinuityStore.FILE + ".") && name.endsWith(PrivateFiles.TEMPORARY_SUFFIX)))
+				{
+					path.deleteIfExists();
+				}
+			}
+			for (Filepath path : files)
+			{
+				String name = path.getFileName();
+				if (!path.exists() || (path.getParent().equals(root) && name.endsWith(".discard"))) continue;
+				if (path.size() > MAX_BATCH_BYTES) throw new IOException("Oversized pending drop");
+				JsonObject body = gson.fromJson(PrivateFiles.readUtf8(path), JsonObject.class);
+				validate(body, path.getParent().getFileName());
+				if (DropEvent.removeCountEvidence(body.getAsJsonArray("events").get(0).getAsJsonObject()))
+					PrivateFiles.write(path, name + ".", gson.toJson(body).getBytes(StandardCharsets.UTF_8));
+			}
+		}
+		marker.deleteIfExists();
+	}
+
 	private static boolean sameEnvelope(JsonObject left, JsonObject right)
 	{
 		return left.get("connectionId").equals(right.get("connectionId"))
@@ -168,7 +208,7 @@ final class DurableDropQueue
 			&& Set.of("regular", "ironman", "hardcore", "ultimate").contains(ProtocolJson.stringValue(character, "accountType"))
 			&& "standard".equals(ProtocolJson.stringValue(character, "profileType")));
 		JsonObject event = body.getAsJsonArray("events").get(0).getAsJsonObject();
-		require(ProtocolJson.hasExactKeys(event, "eventId", "sessionId", "occurredAt", "source", "rollCount", "items"));
+		require(ProtocolJson.hasKeys(event, Set.of("eventId", "sessionId", "occurredAt", "source", "rollCount", "items"), Set.of("sourceCount", "continuity", "collectionLog")));
 		for (String field : List.of("eventId", "sessionId"))
 		{
 			require(ProtocolJson.stringValue(event, field).matches("[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}"));
@@ -176,9 +216,29 @@ final class DurableDropQueue
 		require(java.time.Instant.parse(ProtocolJson.stringValue(event, "occurredAt")).toEpochMilli() > 0);
 		require(ProtocolJson.intValue(event, "rollCount") >= 1 && ProtocolJson.intValue(event, "rollCount") <= 10_000);
 		JsonObject source = event.getAsJsonObject("source");
-		require(ProtocolJson.hasExactKeys(source, "type", "name") && DropEvent.saneLabel(ProtocolJson.stringValue(source, "name"))
+		require(ProtocolJson.hasKeys(source, Set.of("type", "name"), Set.of("npcId")) && DropEvent.saneLabel(ProtocolJson.stringValue(source, "name"))
 			&& Set.of("npc", "pickpocket", "event").contains(ProtocolJson.stringValue(source, "type")));
 		require(!"event".equals(ProtocolJson.stringValue(source, "type")) || DropCapture.EVENTS.contains(ProtocolJson.stringValue(source, "name")));
+		if (source.has("npcId")) require("npc".equals(ProtocolJson.stringValue(source, "type")) && ProtocolJson.intValue(source, "npcId") > 0);
+		if (event.has("sourceCount"))
+		{
+			JsonObject count = event.getAsJsonObject("sourceCount");
+			DropCounterRegistry.Counter counter = DropCounterRegistry.byKey(ProtocolJson.stringValue(count, "counterKey"));
+			require(ProtocolJson.hasExactKeys(count, "value", "unit", "counterKey", "evidence")
+				&& counter != null && counter.unit.equals(ProtocolJson.stringValue(count, "unit"))
+				&& counter.matches(ProtocolJson.stringValue(source, "type"), ProtocolJson.stringValue(source, "name"))
+				&& ProtocolJson.intValue(count, "value") > 0 && "game-message".equals(ProtocolJson.stringValue(count, "evidence"))
+				&& ProtocolJson.intValue(event, "rollCount") == 1);
+		}
+		if (event.has("continuity"))
+		{
+			JsonObject continuity = event.getAsJsonObject("continuity");
+			require(event.has("sourceCount") && ProtocolJson.hasExactKeys(continuity, "id", "from")
+				&& ProtocolJson.stringValue(continuity, "id").matches("[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}")
+				&& ProtocolJson.intValue(continuity, "from") > 0
+				&& ProtocolJson.intValue(continuity, "from") <= ProtocolJson.intValue(event.getAsJsonObject("sourceCount"), "value"));
+		}
+		if (event.has("collectionLog")) require(Set.of("enabled", "disabled", "unknown").contains(ProtocolJson.stringValue(event, "collectionLog")));
 		JsonArray items = event.getAsJsonArray("items");
 		require(items.size() >= 1 && items.size() <= 64);
 		Set<Integer> ids = new HashSet<>();
@@ -189,9 +249,9 @@ final class DurableDropQueue
 			int id = ProtocolJson.intValue(item, "itemId");
 			int quantity = ProtocolJson.intValue(item, "quantity");
 			boolean hasMarketItemId = item.has("marketItemId");
-			boolean validKeys = hasMarketItemId
-				? ProtocolJson.hasExactKeys(item, "itemId", "marketItemId", "itemName", "quantity", "value")
-				: ProtocolJson.hasExactKeys(item, "itemId", "itemName", "quantity", "value");
+			boolean validKeys = ProtocolJson.hasKeys(item, Set.of("itemId", "itemName", "quantity", "value"), Set.of("marketItemId", "newCollectionLogSlot"));
+			if (item.has("newCollectionLogSlot")) require(item.get("newCollectionLogSlot").isJsonPrimitive()
+				&& item.get("newCollectionLogSlot").getAsJsonPrimitive().isBoolean() && item.get("newCollectionLogSlot").getAsBoolean());
 			require(validKeys
 				&& id > 0 && ids.add(id) && quantity > 0 && DropEvent.saneLabel(ProtocolJson.stringValue(item, "itemName")));
 			JsonObject value = item.getAsJsonObject("value");

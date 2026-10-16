@@ -15,6 +15,11 @@ public interface RuneGlassConfig extends Config
 		+ "with RuneGlass, a third-party service not controlled or verified by\n"
 		+ "RuneLite developers. Saved history remains until you delete it in RuneGlass.";
 
+	String DROP_COUNT_SHARING_WARNING = "Shares reward counts/activity, new collection-log evidence, notification\n"
+		+ "settings and count gaps with RuneGlass, a third-party service not controlled\n"
+		+ "or verified by RuneLite developers. Game messages stay local; never stored\n"
+		+ "or uploaded. Only works while Sync drop history is on.";
+
 	@ConfigItem(
 		keyName = "syncEnabled",
 		name = "Enable RuneGlass sync",
@@ -73,11 +78,23 @@ public interface RuneGlassConfig extends Config
 	@ConfigItem(
 		keyName = "dropSyncEnabled",
 		name = "Sync drop history",
-		description = "Opt in to sharing supported Loot Tracker events containing an item stack worth at least 50,000 GP at capture or a curated notable reward, including all accompanying items. Shares source, items, quantities, capture time and available value estimates. Loot Tracker must be enabled. No player loot, raw chat or kill counts. History remains until deletion in RuneGlass. Turning this off deletes unsent drops across local profiles.",
+		description = "Opt in to sharing supported Loot Tracker events containing an item stack worth at least 50,000 GP at capture or a curated notable reward, including all accompanying items. Shares source, items, quantities, capture time and available value estimates. Loot Tracker must be enabled. No player loot or raw chat. Counts and collection-log evidence are shared only when Share kill counts with drops is on. History remains until deletion in RuneGlass. Turning this off deletes unsent drops across local profiles.",
 		position = 5,
 		warning = DROP_SHARING_WARNING
 	)
 	default boolean dropSyncEnabled()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "dropCountSyncEnabled",
+		name = "Share kill counts with drops",
+		description = "Opt in to sharing the count shown in game with a supported reward and its activity: boss kill counts, raid completions including mode, Barrows chests and clue caskets. Also shares collection-log notification settings, whether the log reported an item as new, and whether counts were missed between drops (continuity). Game messages are read locally only to find this evidence and are never uploaded or stored. Only works while Sync drop history is on. Turning this off deletes local continuity and removes this evidence from unsent drops; the drops are kept. Synced history remains until deletion in RuneGlass.",
+		position = 6,
+		warning = DROP_COUNT_SHARING_WARNING
+	)
+	default boolean dropCountSyncEnabled()
 	{
 		return false;
 	}

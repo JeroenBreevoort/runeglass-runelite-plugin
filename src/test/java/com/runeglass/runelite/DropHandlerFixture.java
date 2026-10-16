@@ -53,8 +53,13 @@ final class DropHandlerFixture implements AutoCloseable
 	final Map<Integer, ItemComposition> definitions = new ConcurrentHashMap<>();
 	final DropClient dropClient;
 	final ConfigManager configManager;
+	volatile int tick = 100;
+	volatile int collectionLogSetting = 1;
 	volatile boolean syncEnabled = true;
 	volatile boolean dropSyncEnabled = true;
+	volatile boolean dropCountSyncEnabled;
+	final EventBus eventBus = new EventBus();
+	final AtomicInteger evidenceReads = new AtomicInteger();
 	volatile GameState gameState = GameState.LOGGED_IN;
 	volatile EnumSet<WorldType> worldTypes = EnumSet.noneOf(WorldType.class);
 
@@ -93,6 +98,19 @@ final class DropHandlerFixture implements AutoCloseable
 				case "getGameState": return gameState;
 				case "getWorldType": return worldTypes;
 				case "isClientThread": return true;
+				case "getTopLevelWorldView": return null;
+				case "getTickCount": return tick;
+				case "getVarbitValue":
+					if ((Integer) args[0] == net.runelite.api.gameval.VarbitID.IRONMAN) return 0;
+					evidenceReads.incrementAndGet(); return collectionLogSetting;
+				case "getRevision": return 231;
+				case "getLocalPlayer":
+					return Proxy.newProxyInstance(net.runelite.api.Player.class.getClassLoader(),
+						new Class<?>[]{net.runelite.api.Player.class}, (player, getter, arguments) ->
+						{
+							if (getter.getName().equals("getName")) return "Fixture";
+							throw new AssertionError("Unexpected player read " + getter.getName());
+						});
 				case "getItemDefinition":
 					definitionReads.incrementAndGet();
 					return definitions.get((Integer) args[0]);
@@ -103,6 +121,7 @@ final class DropHandlerFixture implements AutoCloseable
 		{
 			@Override public boolean syncEnabled() { return syncEnabled; }
 			@Override public boolean dropSyncEnabled() { return dropSyncEnabled; }
+			@Override public boolean dropCountSyncEnabled() { return dropCountSyncEnabled; }
 		};
 		Constructor<ConfigManager> configConstructor = ConfigManager.class.getDeclaredConstructor(String.class,
 			ScheduledExecutorService.class, EventBus.class, Client.class, Gson.class,
@@ -123,6 +142,11 @@ final class DropHandlerFixture implements AutoCloseable
 			@Override public void onInvalidConnection(PairingClient.Credentials credentials, boolean bindingMismatch) { }
 		});
 		setField(plugin, "client", client);
+		setField(plugin, "eventBus", eventBus);
+		setField(plugin, "clientThread", new ClientThread()
+		{
+			@Override public void invokeLater(Runnable task) { task.run(); }
+		});
 		setField(plugin, "config", config);
 		setField(plugin, "configManager", configManager);
 		setField(plugin, "itemManager", itemManager);
@@ -134,15 +158,41 @@ final class DropHandlerFixture implements AutoCloseable
 		((SkillsSyncSession) getField(plugin, "session")).start();
 		dropClient.connect(CREDENTIALS, DropCaptureTest.CONTEXT);
 		drainTransport();
+		plugin.advanceDropEvidence();
+		tick += 6;
+		plugin.advanceDropEvidence();
+	}
+
+	void changeCountConsent(boolean enabled) throws Exception
+	{
+		dropCountSyncEnabled = enabled;
+		net.runelite.client.events.ConfigChanged event = new net.runelite.client.events.ConfigChanged();
+		event.setGroup(RuneGlassConfig.GROUP);
+		event.setKey("dropCountSyncEnabled");
+		event.setNewValue(Boolean.toString(enabled));
+		plugin.onConfigChanged(event);
+		drainTransport();
+	}
+
+	void enableCounts() throws Exception
+	{
+		dropCountSyncEnabled = true;
+		dropClient.connect(CREDENTIALS, DropCaptureTest.CONTEXT, "fixture-profile", true);
+		drainTransport();
+		plugin.advanceDropEvidence();
+		tick += 6;
+		plugin.advanceDropEvidence();
 	}
 
 	void drainTransport() throws Exception
 	{
-		executor.submit(() -> { }).get(3, TimeUnit.SECONDS);
+		executor.submit(() -> { }).get(10, TimeUnit.SECONDS);
 	}
 
 	JsonObject takeUpload() throws InterruptedException
 	{
+		tick += 11;
+		plugin.advanceDropEvidence();
 		return uploads.poll(3, TimeUnit.SECONDS);
 	}
 

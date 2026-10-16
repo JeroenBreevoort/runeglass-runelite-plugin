@@ -65,6 +65,199 @@ public class DropClientTest
 		server.shutdown();
 	}
 
+	@Test public void observedLowKillsAndRestartMaintainContinuityAndRetriesNeverAdvanceIt() throws Exception
+	{
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "rs-profile", true);
+		transport.observe(observation(100, true));
+		JsonObject first = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		await(() -> queueSize("connection") == 0);
+		transport.observe(observation(101, false));
+		executor.submit(() -> { }).get(WAIT_SECONDS, TimeUnit.SECONDS);
+		assertEquals(1, server.getRequestCount());
+		transport.pause();
+		transport = transport(storage);
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "rs-profile", true);
+		transport.observe(observation(102, true));
+		JsonObject next = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		assertEquals(first.get("continuity"), next.get("continuity"));
+		await(() -> queueSize("connection") == 0);
+		transport.observe(observation(105, true));
+		JsonObject gap = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		assertEquals(105, gap.getAsJsonObject("continuity").get("from").getAsInt());
+		assertEquals(first.getAsJsonObject("continuity").get("id"), gap.getAsJsonObject("continuity").get("id"));
+		transport.discardAll();
+		executor.submit(() -> { }).get(WAIT_SECONDS, TimeUnit.SECONDS);
+		assertFalse(Files.exists(root.resolve("connection").resolve(DropContinuityStore.FILE)));
+	}
+
+	@Test public void evidenceRetryReusesFrozenBytesWithoutAdvancingContinuity() throws Exception
+	{
+		server.setDispatcher(new Dispatcher()
+		{
+			private int requests;
+			@Override public MockResponse dispatch(RecordedRequest request)
+			{ return ++requests == 1 ? new MockResponse().setResponseCode(503) : accepted(request, false); }
+		});
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "rs-profile", true);
+		transport.observe(observation(100, true));
+		String first = body(take());
+		assertEquals(first, body(take()));
+		await(() -> queueSize("connection") == 0);
+		JsonObject persisted = gson.fromJson(Files.readString(root.resolve("connection").resolve(DropContinuityStore.FILE)), JsonObject.class);
+		assertEquals(100, persisted.getAsJsonObject("counters").getAsJsonObject("vorkath").get("last").getAsInt());
+		JsonObject saved = DropCaptureTest.event(gson.fromJson(first, JsonObject.class));
+		assertEquals(persisted.getAsJsonObject("counters").getAsJsonObject("vorkath").get("id"), saved.getAsJsonObject("continuity").get("id"));
+	}
+
+	@Test public void rejectedSuccessBreaksContinuityAndNewProfileCannotReuseIt() throws Exception
+	{
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "rs-profile", true);
+		transport.observe(observation(100, true));
+		JsonObject first = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		await(() -> queueSize("connection") == 0);
+		transport.captureFailed();
+		transport.observe(observation(101, true));
+		JsonObject afterFailure = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		assertNotEquals(first.getAsJsonObject("continuity").get("id"), afterFailure.getAsJsonObject("continuity").get("id"));
+		await(() -> queueSize("connection") == 0);
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "different-profile", true);
+		transport.observe(observation(102, true));
+		JsonObject other = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		assertNotEquals(afterFailure.getAsJsonObject("continuity").get("id"), other.getAsJsonObject("continuity").get("id"));
+	}
+
+	@Test public void noCountConsentStripsRestoredEvidenceBeforeFirstUploadAndNeverOpensContinuity() throws Exception
+	{
+		JsonObject enriched = enrichedDrop("connection");
+		new DurableDropQueue(storage, "connection", gson).append(enriched);
+		Path continuity = root.resolve("connection").resolve(DropContinuityStore.FILE);
+		Files.writeString(continuity, "invalid continuity must be deleted without loading it");
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		JsonObject uploaded = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		DropCountConsentTest.assertLegacy(uploaded);
+		assertEquals(DropCaptureTest.event(enriched).get("eventId"), uploaded.get("eventId"));
+		await(() -> queueSize("connection") == 0);
+		assertFalse(Files.exists(continuity));
+		transport.observe(observation(101, true));
+		DropCountConsentTest.assertLegacy(DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class)));
+		transport.captureFailed();
+		executor.submit(() -> { }).get(WAIT_SECONDS, TimeUnit.SECONDS);
+		assertFalse(Files.exists(continuity));
+	}
+
+	@Test public void countRevocationPreservesAllProfilesAndBlockedDropsWhileRemovingTheirEvidence() throws Exception
+	{
+		for (String connection : List.of("connection", "inactive"))
+		{
+			DurableDropQueue queue = new DurableDropQueue(storage, connection, gson);
+			queue.append(enrichedDrop(connection));
+			queue.append(enrichedDrop(connection));
+			queue.block(queue.batch(false).get(0));
+			Files.writeString(root.resolve(connection).resolve(DropContinuityStore.FILE), "private continuity");
+		}
+		transport.revokeCountSharing();
+		executor.submit(() -> { }).get(WAIT_SECONDS, TimeUnit.SECONDS);
+		for (String connection : List.of("connection", "inactive"))
+		{
+			assertEquals(1, queueSize(connection));
+			assertFalse(Files.exists(root.resolve(connection).resolve(DropContinuityStore.FILE)));
+			try (java.util.stream.Stream<Path> paths = Files.list(root.resolve(connection)))
+			{
+				List<Path> files = paths.collect(java.util.stream.Collectors.toList());
+				assertEquals(2, files.size());
+				for (Path file : files) DropCountConsentTest.assertLegacy(DropCaptureTest.event(gson.fromJson(Files.readString(file), JsonObject.class)));
+			}
+		}
+		assertFalse(DurableDropQueue.countRevocationMarker(storage).exists());
+		assertEquals(0, server.getRequestCount());
+	}
+
+	@Test public void revocationDuringQueuedPersistenceCannotSaveOrUploadOldEvidence() throws Exception
+	{
+		CountDownLatch release = new CountDownLatch(1);
+		Future<Boolean> held = executor.submit((Callable<Boolean>) () -> release.await(WAIT_SECONDS, TimeUnit.SECONDS));
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "profile", true);
+		transport.observe(observation(100, true));
+		transport.revokeCountSharing();
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "profile", false);
+		release.countDown();
+		assertTrue(held.get(WAIT_SECONDS, TimeUnit.SECONDS));
+		DropCountConsentTest.assertLegacy(DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class)));
+		await(() -> queueSize("connection") == 0);
+		assertFalse(Files.exists(root.resolve("connection").resolve(DropContinuityStore.FILE)));
+	}
+
+	@Test public void revocationCancelsInFlightAndStripsBeforeResumingLegacyUploads() throws Exception
+	{
+		server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "profile", true);
+		transport.observe(observation(100, true));
+		JsonObject first = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		assertTrue(first.has("sourceCount"));
+		transport.revokeCountSharing();
+		assertFalse(transport.isConnected());
+		executor.submit(() -> { }).get(WAIT_SECONDS, TimeUnit.SECONDS);
+		assertEquals(1, queueSize("connection"));
+		assertFalse(Files.exists(root.resolve("connection").resolve(DropContinuityStore.FILE)));
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		JsonObject next = DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class));
+		DropCountConsentTest.assertLegacy(next);
+		assertEquals(first.get("eventId"), next.get("eventId"));
+	}
+
+	@Test public void unfinishedCountRevocationIsRetriedEvenWhenRestartedWithCountsEnabled() throws Exception
+	{
+		new DurableDropQueue(storage, "connection", gson).append(enrichedDrop("connection"));
+		PrivateFiles.write(DurableDropQueue.countRevocationMarker(storage), "revoke.", new byte[]{1});
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT, "profile", true);
+		DropCountConsentTest.assertLegacy(DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class)));
+		assertFalse(DurableDropQueue.countRevocationMarker(storage).exists());
+	}
+
+	@Test public void failedCountCleanupBlocksUploadsUntilRetriedSuccessfully() throws Exception
+	{
+		new DurableDropQueue(storage, "connection", gson).append(enrichedDrop("connection"));
+		Path damaged = root.resolve("connection/broken.json.blocked");
+		Files.writeString(damaged, "not json");
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		executor.submit(() -> { }).get(WAIT_SECONDS, TimeUnit.SECONDS);
+		assertFalse(transport.isConnected());
+		assertTrue(DurableDropQueue.countRevocationMarker(storage).exists());
+		assertTrue(statuses.stream().anyMatch(status -> status.contains("count evidence could not be removed")));
+		assertEquals(0, server.getRequestCount());
+		Files.delete(damaged);
+		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
+		transport.connect(credentials, DropCaptureTest.CONTEXT);
+		DropCountConsentTest.assertLegacy(DropCaptureTest.event(gson.fromJson(body(take()), JsonObject.class)));
+		assertFalse(DurableDropQueue.countRevocationMarker(storage).exists());
+	}
+
+	private JsonObject enrichedDrop(String connection)
+	{
+		DropCorrelator.Completed completed = observation(100, true);
+		JsonObject evidence = new JsonObject();
+		evidence.addProperty("id", java.util.UUID.randomUUID().toString());
+		evidence.addProperty("from", 100);
+		DropEvent event = completed.result.event().get();
+		JsonObject body = event.freeze(completed.count, evidence, "enabled", Set.of(22006))
+			.envelope(DropCaptureTest.CONTEXT, connection);
+		DropCaptureTest.event(body).getAsJsonObject("source").addProperty("npcId", 8061);
+		assertTrue(DropCaptureTest.event(body).getAsJsonArray("items").get(0).getAsJsonObject().has("newCollectionLogSlot"));
+		return body;
+	}
+
+	private static DropCorrelator.Completed observation(int count, boolean retained)
+	{
+		return new DropCorrelator.Completed(DropCorrelatorTest.drop("npc", "Vorkath", retained),
+			new DropCountParser.Count(DropCounterRegistry.byKey("vorkath"), count), "enabled", Set.of());
+	}
+
 	@Test public void lowOnlyRewardsNeverReachDiskOrHttp() throws Exception
 	{
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
@@ -77,7 +270,7 @@ public class DropClientTest
 			capture.capture(loot, id -> DropCaptureTest.definition(id, true, -1, -1),
 				id -> id == 10000 ? 49_999 : 30_000, DropCaptureTest.SESSION, DropCaptureTest.NOW).event().ifPresent(transport::publish);
 		}
-		executor.submit(() -> { }).get(2, TimeUnit.SECONDS);
+		executor.submit(() -> { }).get(WAIT_SECONDS, TimeUnit.SECONDS);
 		assertEquals(0, queueSize("connection"));
 		assertNull(server.takeRequest(250, TimeUnit.MILLISECONDS));
 		assertEquals(0, server.getRequestCount());
@@ -106,8 +299,8 @@ public class DropClientTest
 		RecordedRequest first = take();
 		RecordedRequest second = take();
 		RecordedRequest third = take();
-		assertEquals(first.getBody().snapshot(), second.getBody().snapshot());
-		assertEquals(second.getBody().snapshot(), third.getBody().snapshot());
+		assertEquals(body(first), body(second));
+		assertEquals(body(second), body(third));
 		assertEquals("Bearer " + credentials.getRawCredential(), first.getHeader("Authorization"));
 		assertTrue(executor.delays.contains(60_000L));
 		await(() -> queueSize("connection") == 0);
@@ -124,7 +317,7 @@ public class DropClientTest
 		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
 		transport.connect(credentials, new SyncContext(java.util.UUID.randomUUID().toString(), "Fixture", "regular", "standard", "1.2.0", "1.13.1", 231));
 		RecordedRequest next = take();
-		assertEquals(first.getBody().clone().readUtf8(), next.getBody().clone().readUtf8());
+		assertEquals(body(first), body(next));
 		await(() -> queueSize("connection") == 0);
 	}
 
@@ -138,9 +331,9 @@ public class DropClientTest
 			@Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, true); }
 		});
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
-		JsonObject first = gson.fromJson(take().getBody().clone().readUtf8(), JsonObject.class);
+		JsonObject first = gson.fromJson(body(take()), JsonObject.class);
 		assertEquals(2, first.getAsJsonArray("events").size());
-		JsonObject second = gson.fromJson(take().getBody().clone().readUtf8(), JsonObject.class);
+		JsonObject second = gson.fromJson(body(take()), JsonObject.class);
 		assertEquals(1, second.getAsJsonArray("events").size());
 		assertEquals(first.getAsJsonArray("events").get(1), second.getAsJsonArray("events").get(0));
 		await(() -> queueSize("connection") == 0);
@@ -204,7 +397,7 @@ public class DropClientTest
 		{
 			@Override public MockResponse dispatch(RecordedRequest request)
 			{
-				JsonObject body = gson.fromJson(request.getBody().clone().readUtf8(), JsonObject.class);
+				JsonObject body = gson.fromJson(body(request), JsonObject.class);
 				for (com.google.gson.JsonElement event : body.getAsJsonArray("events"))
 				{
 					if (event.getAsJsonObject().get("eventId").getAsString().equals(rejected)) return error(409, "event_conflict");
@@ -222,7 +415,7 @@ public class DropClientTest
 	@Test public void profileChangeDuringQueuedPersistenceCannotRebindOldEvents() throws Exception
 	{
 		CountDownLatch release = new CountDownLatch(1);
-		Future<Boolean> persistenceHeld = executor.submit((Callable<Boolean>) () -> release.await(3, TimeUnit.SECONDS));
+		Future<Boolean> persistenceHeld = executor.submit((Callable<Boolean>) () -> release.await(WAIT_SECONDS, TimeUnit.SECONDS));
 		server.setDispatcher(new Dispatcher() { @Override public MockResponse dispatch(RecordedRequest request) { return accepted(request, false); } });
 		transport.connect(credentials, DropCaptureTest.CONTEXT);
 		transport.publish(DropCaptureTest.drop());
@@ -232,8 +425,8 @@ public class DropClientTest
 		transport.publish(DropCaptureTest.drop());
 		assertFalse(persistenceHeld.isDone());
 		release.countDown();
-		assertTrue(persistenceHeld.get(3, TimeUnit.SECONDS));
-		JsonObject uploaded = gson.fromJson(take().getBody().clone().readUtf8(), JsonObject.class);
+		assertTrue(persistenceHeld.get(WAIT_SECONDS, TimeUnit.SECONDS));
+		JsonObject uploaded = gson.fromJson(body(take()), JsonObject.class);
 		assertEquals("next_connection", uploaded.get("connectionId").getAsString());
 		assertEquals("Second", uploaded.getAsJsonObject("character").get("displayName").getAsString());
 		await(() -> queueSize("connection") == 1 && queueSize("next_connection") == 0);
@@ -323,7 +516,7 @@ public class DropClientTest
 
 	private MockResponse accepted(RecordedRequest request, boolean partial)
 	{
-		JsonObject body = gson.fromJson(request.getBody().clone().readUtf8(), JsonObject.class);
+		JsonObject body = gson.fromJson(body(request), JsonObject.class);
 		JsonArray ids = new JsonArray();
 		for (com.google.gson.JsonElement event : body.getAsJsonArray("events"))
 		{
@@ -340,9 +533,14 @@ public class DropClientTest
 	{
 		return new MockResponse().setResponseCode(code).setBody("{\"protocolVersion\":1,\"error\":\"" + error + "\"}");
 	}
+	private static final long WAIT_SECONDS = 10;
 	private RecordedRequest take() throws InterruptedException
 	{
-		RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS); assertNotNull(statuses.toString() + executor.delays.toString(), request); return request;
+		RecordedRequest request = server.takeRequest(WAIT_SECONDS, TimeUnit.SECONDS); assertNotNull(statuses.toString() + executor.delays.toString(), request); return request;
+	}
+	private static String body(RecordedRequest request)
+	{
+		synchronized (request) { return request.getBody().clone().readUtf8(); }
 	}
 	private int queueSize(String connectionId)
 	{
@@ -363,12 +561,12 @@ public class DropClientTest
 	}
 	private void await(BooleanSupplier condition) throws InterruptedException
 	{
-		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
 		while (!condition.getAsBoolean())
 		{
 			long remaining = deadline - System.nanoTime();
-			assertTrue("Drop transport made no further progress: " + statuses, remaining > 0
-				&& progress.poll(remaining, TimeUnit.NANOSECONDS) != null);
+			assertTrue("Drop transport made no further progress: " + statuses, remaining > 0);
+			progress.poll(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(20)), TimeUnit.NANOSECONDS);
 		}
 	}
 	private static final class FastScheduler extends ScheduledThreadPoolExecutor

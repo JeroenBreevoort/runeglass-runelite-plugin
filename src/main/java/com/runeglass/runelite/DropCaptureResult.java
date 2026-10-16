@@ -57,10 +57,18 @@ final class DropCaptureResult
 	private final Long highestStackGp;
 	private final boolean notable;
 	private final DropEvent event;
+	private final DropEvent observation;
 
 	private DropCaptureResult(Reason reason, String sourceType, int itemStacks, int valuedStacks,
 		Long highestStackGp, boolean notable, DropEvent event)
 	{
+		this(reason, sourceType, itemStacks, valuedStacks, highestStackGp, notable, event, event);
+	}
+
+	private DropCaptureResult(Reason reason, String sourceType, int itemStacks, int valuedStacks,
+		Long highestStackGp, boolean notable, DropEvent event, DropEvent observation)
+	{
+		this.observation = observation;
 		this.reason = reason;
 		this.sourceType = sourceType;
 		this.itemStacks = itemStacks;
@@ -93,6 +101,15 @@ final class DropCaptureResult
 		return new DropCaptureResult(event == null ? Reason.BELOW_THRESHOLD : Reason.ELIGIBLE,
 			sourceType, itemStacks, valuedStacks, highestStackGp, notable, event);
 	}
+
+	static DropCaptureResult observed(String sourceType, int itemStacks, int valuedStacks,
+		Long highestStackGp, boolean notable, DropEvent observation, boolean retained)
+	{
+		return new DropCaptureResult(retained ? Reason.ELIGIBLE : Reason.BELOW_THRESHOLD,
+			sourceType, itemStacks, valuedStacks, highestStackGp, notable, retained ? observation : null, observation);
+	}
+
+	Optional<DropEvent> observation() { return Optional.ofNullable(observation); }
 
 	DropCaptureResult submitted(boolean accepted)
 	{

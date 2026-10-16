@@ -39,6 +39,57 @@ public class DurableDropQueueTest
 		assertEquals(first, new DurableDropQueue(root, "connection", gson).batch(false).get(0).body);
 	}
 
+	@Test public void countEvidenceRoundTripsAlongsideLegacyEventsAndRejectsInvalidExtensions() throws Exception
+	{
+		Filepath root = root();
+		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
+		JsonObject legacy = DropCaptureTest.drop().envelope(DropCaptureTest.CONTEXT, "connection");
+		DropEvent captured = DropCorrelatorTest.drop("npc", "Vorkath", true).event().get();
+		JsonObject continuity = new JsonObject(); continuity.addProperty("id", java.util.UUID.randomUUID().toString()); continuity.addProperty("from", 100);
+		JsonObject current = captured.freeze(new DropCountParser.Count(DropCounterRegistry.byKey("vorkath"), 1200),
+			continuity, "enabled", Set.of(22006)).envelope(DropCaptureTest.CONTEXT, "connection");
+		queue.append(legacy); queue.append(current);
+		DropContinuityStore state = new DropContinuityStore(root.joinSegment("connection"), gson, "profile");
+		state.observe(new DropCountParser.Count(DropCounterRegistry.byKey("vorkath"), 1200)); state.save();
+		DurableDropQueue restored = new DurableDropQueue(root, "connection", gson);
+		assertFalse(restored.hasDamagedRecords()); assertEquals(2, restored.size());
+		assertEquals(legacy, restored.batch(false).get(0).body); assertEquals(current, restored.batch(false).get(1).body);
+		for (String field : List.of("sourceCount", "continuity", "collectionLog"))
+		{
+			JsonObject bad = current.deepCopy(); DropCaptureTest.event(bad).add(field, com.google.gson.JsonNull.INSTANCE);
+			assertThrows(Exception.class, () -> queue.append(bad));
+		}
+		for (String field : List.of("computedLuck", "waitingInterval", "firstCopy", "rawChat"))
+		{
+			JsonObject bad = current.deepCopy(); DropCaptureTest.event(bad).addProperty(field, true);
+			assertThrows(java.io.IOException.class, () -> queue.append(bad));
+		}
+		JsonObject mismatch = current.deepCopy(); DropCaptureTest.event(mismatch).getAsJsonObject("sourceCount").addProperty("counterKey", "zulrah");
+		assertThrows(java.io.IOException.class, () -> queue.append(mismatch));
+		JsonObject invalidFrom = current.deepCopy(); DropCaptureTest.event(invalidFrom).getAsJsonObject("continuity").addProperty("from", 1201);
+		assertThrows(java.io.IOException.class, () -> queue.append(invalidFrom));
+		JsonObject invalidFlag = current.deepCopy(); DropCaptureTest.event(invalidFlag).getAsJsonArray("items").get(0).getAsJsonObject().addProperty("newCollectionLogSlot", "true");
+		assertThrows(java.io.IOException.class, () -> queue.append(invalidFlag));
+		assertEquals(2, queue.size());
+	}
+
+	@Test public void countRevocationLeavesLegacyPayloadAndDiskBytesIdentical() throws Exception
+	{
+		Filepath root = root().joinSegment("drops-v1");
+		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
+		DropEvent event = DropCaptureTest.notedDrop(123);
+		JsonObject original = event.envelope(DropCaptureTest.CONTEXT, "connection");
+		assertEquals(gson.toJson(original), gson.toJson(event.withoutCountEvidence().envelope(DropCaptureTest.CONTEXT, "connection")));
+		queue.append(original);
+		Path path = TestStorage.path(queue.batch(false).get(0).path);
+		String unusualWhitespace = "\n " + Files.readString(path) + "\n";
+		Files.writeString(path, unusualWhitespace);
+		DurableDropQueue.stripCountEvidence(root, gson);
+		assertEquals(unusualWhitespace, Files.readString(path));
+		assertEquals(original, new DurableDropQueue(root, "connection", gson).batch(false).get(0).body);
+		assertFalse(root.joinSegment("connection").joinSegment(DropContinuityStore.FILE).exists());
+	}
+
 	@Test public void damagedRecordDoesNotDestroyOrBlockHealthyRecords() throws Exception
 	{
 		Filepath root = root();

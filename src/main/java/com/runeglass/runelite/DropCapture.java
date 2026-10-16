@@ -123,7 +123,8 @@ final class DropCapture
 			retained |= DropPolicy.qualifies(sourceType, loot.getName(), itemId, capturedStackGp);
 			notable |= DropPolicy.isNotableReward(sourceType, loot.getName(), itemId);
 		}
-		return DropCaptureResult.evaluated(sourceType, items.size(), valuedStacks, highestStackGp, notable,
-			retained ? new DropEvent(UUID.randomUUID(), sessionId, now, sourceType, loot.getName(), loot.getAmount(), items) : null);
+		return DropCaptureResult.observed(sourceType, items.size(), valuedStacks, highestStackGp, notable,
+			new DropEvent(UUID.randomUUID(), sessionId, now, sourceType, loot.getName(), loot.getAmount(), items,
+				loot.getMetadata() instanceof net.runelite.api.NPCComposition ? ((net.runelite.api.NPCComposition) loot.getMetadata()).getId() : null), retained);
 	}
 }

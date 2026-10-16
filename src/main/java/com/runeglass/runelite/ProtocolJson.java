@@ -57,6 +57,14 @@ final class ProtocolJson
 		return actual.equals(new HashSet<>(Arrays.asList(keys)));
 	}
 
+	static boolean hasKeys(JsonObject body, Set<String> required, Set<String> optional)
+	{
+		Set<String> actual = new HashSet<>(body.keySet());
+		if (!actual.containsAll(required)) return false;
+		actual.removeAll(required);
+		return optional.containsAll(actual);
+	}
+
 	static String stringValue(JsonObject body, String key)
 	{
 		JsonElement value = body.get(key);

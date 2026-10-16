@@ -23,6 +23,7 @@ public class RuneGlassConfigTest
 		assertFalse(config.appearanceSyncEnabled());
 		assertFalse(config.questSyncEnabled());
 		assertFalse(config.dropSyncEnabled());
+		assertFalse(config.dropCountSyncEnabled());
 	}
 
 	@Test
@@ -34,13 +35,14 @@ public class RuneGlassConfigTest
 			ConfigItem item = method.getAnnotation(ConfigItem.class);
 			if (item != null && !item.warning().isEmpty())
 			{
-				assertTrue(item.keyName().equals("syncEnabled") || item.keyName().equals("dropSyncEnabled"));
+				assertTrue(item.keyName().equals("syncEnabled") || item.keyName().equals("dropSyncEnabled") || item.keyName().equals("dropCountSyncEnabled"));
 				assertEquals(item.keyName().equals("syncEnabled")
-					? RuneGlassConfig.THIRD_PARTY_WARNING : RuneGlassConfig.DROP_SHARING_WARNING, item.warning());
+					? RuneGlassConfig.THIRD_PARTY_WARNING : item.keyName().equals("dropSyncEnabled")
+					? RuneGlassConfig.DROP_SHARING_WARNING : RuneGlassConfig.DROP_COUNT_SHARING_WARNING, item.warning());
 				warningCount++;
 			}
 		}
-		assertEquals(2, warningCount);
+		assertEquals(3, warningCount);
 
 		String warning = RuneGlassConfig.THIRD_PARTY_WARNING;
 		assertTrue(warning.length() <= 300);
@@ -93,6 +95,29 @@ public class RuneGlassConfigTest
 		assertTrue(description.contains("Loot Tracker must be enabled"));
 		assertTrue(description.contains("History remains until deletion"));
 		assertTrue(description.contains("deletes unsent drops across local profiles"));
+	}
+
+	@Test
+	public void existingUsersMustSeparatelyEnableCountSharingWithItsOwnWarning() throws Exception
+	{
+		RuneGlassConfig existing = new RuneGlassConfig()
+		{
+			@Override public boolean syncEnabled() { return true; }
+			@Override public boolean dropSyncEnabled() { return true; }
+		};
+		assertFalse(existing.dropCountSyncEnabled());
+		ConfigItem item = RuneGlassConfig.class.getMethod("dropCountSyncEnabled").getAnnotation(ConfigItem.class);
+		assertEquals("Share kill counts with drops", item.name());
+		assertEquals(6, item.position());
+		assertEquals(RuneGlassConfig.DROP_COUNT_SHARING_WARNING, item.warning());
+		assertTrue(item.warning().length() <= 300);
+		for (String line : item.warning().split("\n")) assertTrue(line.length() <= 80);
+		for (String disclosure : new String[]{"boss kill counts", "raid completions including mode", "Barrows chests",
+			"clue caskets", "notification settings", "reported an item as new", "counts were missed", "never uploaded or stored",
+			"Only works while Sync drop history is on", "the drops are kept"})
+			assertTrue(disclosure, item.description().contains(disclosure));
+		assertTrue(RuneGlassConfig.class.getMethod("dropSyncEnabled").getAnnotation(ConfigItem.class).description()
+			.contains("only when Share kill counts with drops is on"));
 	}
 
 	@Test
