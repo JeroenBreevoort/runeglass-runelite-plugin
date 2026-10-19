@@ -42,7 +42,6 @@ final class DropClient
 	private final AtomicInteger capturesWaiting = new AtomicInteger();
 	private boolean running;
 	private volatile boolean purgeFailed;
-	private volatile boolean countCleanupFailed;
 	private final Set<State> pendingStates = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 	private volatile State active;
 
@@ -64,15 +63,13 @@ final class DropClient
 
 	void connect(PairingClient.Credentials credentials, SyncContext context)
 	{
-		connect(credentials, context, credentials.getConnectionId(), false);
+		connect(credentials, context, credentials.getConnectionId());
 	}
 
-	void connect(PairingClient.Credentials credentials, SyncContext context, String profileKey, boolean shareCounts)
+	void connect(PairingClient.Credentials credentials, SyncContext context, String profileKey)
 	{
-		if (!shareCounts) revokeCountSharing();
 		pause();
 		State state = new State(credentials, context);
-		state.shareCounts = shareCounts;
 		pendingStates.add(state);
 		active = state;
 		submit(() ->
@@ -83,11 +80,9 @@ final class DropClient
 			{
 				purge(root.joinSegment(credentials.getConnectionId()));
 			}
-			if (DurableDropQueue.countRevocationMarker(root).exists()) stripCountEvidence();
-			if (countCleanupFailed) return;
 			if (purgeFailed)
 			{
-				status(state, "Drops paused: local deletion failed. Turn drop sync off to retry deletion.");
+				status(state, "Drops paused: local deletion failed. Turn RuneGlass sync off to retry deletion.");
 				return;
 			}
 			if (!"standard".equals(context.getProfileType()))
@@ -98,11 +93,8 @@ final class DropClient
 			try
 			{
 				state.queue = new DurableDropQueue(root, credentials.getConnectionId(), gson);
-				if (state.shareCounts)
-				{
-					state.continuity = new DropContinuityStore(root.joinSegment(credentials.getConnectionId()), gson, profileKey);
-					if (state.continuity.damaged()) state.missed = true;
-				}
+				state.continuity = new DropContinuityStore(root.joinSegment(credentials.getConnectionId()), gson, profileKey);
+				if (state.continuity.damaged()) state.missed = true;
 				status(state, queueStatus(state));
 				dispatch(state);
 			}
@@ -117,7 +109,7 @@ final class DropClient
 	boolean isConnected()
 	{
 		State state = active;
-		return state != null && !state.revoked && !state.paused && !purgeFailed && !countCleanupFailed && "standard".equals(state.context.getProfileType());
+		return state != null && !state.revoked && !state.paused && !purgeFailed && "standard".equals(state.context.getProfileType());
 	}
 
 	void captureFailed()
@@ -155,12 +147,12 @@ final class DropClient
 		{
 			try
 			{
-				if (state.revoked || purgeFailed || countCleanupFailed || state.paused) return;
+				if (state.revoked || purgeFailed || state.paused) return;
 				if (state.queue == null) throw new IOException("Queue unavailable");
-				DropEvent frozen = state.shareCounts ? event : event.withoutCountEvidence();
-				boolean counterObserved = state.shareCounts && completed != null && (completed.count != null || DropCounterRegistry.COUNTERS.stream()
+				DropEvent frozen = event;
+				boolean counterObserved = completed != null && (completed.count != null || DropCounterRegistry.COUNTERS.stream()
 					.anyMatch(counter -> counter.matches(event.sourceType(), event.sourceName())));
-				if (state.shareCounts && completed != null)
+				if (completed != null)
 				{
 					JsonObject evidence = null;
 					if (completed.count == null) state.continuity.invalidate(event.sourceType(), event.sourceName());
@@ -194,7 +186,7 @@ final class DropClient
 
 	private void invalidateContinuity(State state)
 	{
-		if (state.revoked || !state.shareCounts || state.continuity == null) return;
+		if (state.revoked || state.continuity == null) return;
 		state.continuity.invalidateAll();
 		try { state.continuity.save(); }
 		catch (IOException | RuntimeException exception) { state.paused = true; }
@@ -209,28 +201,6 @@ final class DropClient
 			cancel(previous);
 			listener.onStatus("Drop sync paused. Saved pending drops remain on disk for this connection.");
 			submit(() -> pendingStates.remove(previous));
-		}
-	}
-
-	void revokeCountSharing()
-	{
-		pendingStates.forEach(state -> state.shareCounts = false);
-		pause();
-		submit(this::stripCountEvidence);
-	}
-
-	private void stripCountEvidence()
-	{
-		try
-		{
-			DurableDropQueue.stripCountEvidence(root, gson);
-			pendingStates.forEach(state -> state.continuity = null);
-			countCleanupFailed = false;
-		}
-		catch (IOException | RuntimeException exception)
-		{
-			countCleanupFailed = true;
-			listener.onStatus("Drops stopped: count evidence could not be removed locally. Turn count sharing off to retry cleanup; uploads are blocked.");
 		}
 	}
 
@@ -264,13 +234,8 @@ final class DropClient
 				DurableDropQueue.purge(path);
 				DurableDropQueue.discardMarker(path).deleteIfExists();
 			}
-			if (path.equals(root))
-			{
-				DurableDropQueue.countRevocationMarker(root).deleteIfExists();
-				countCleanupFailed = false;
-			}
 			purgeFailed = DurableDropQueue.discardMarker(root).exists();
-			if (active == null) listener.onStatus("Drop sync is off. Pending drops have been removed; synced history remains until deletion.");
+			if (active == null) listener.onStatus("RuneGlass sync is off. Pending drops have been removed; synced history remains until deletion.");
 		}
 		catch (IOException | RuntimeException exception)
 		{
@@ -281,7 +246,7 @@ final class DropClient
 
 	private void dispatch(State state)
 	{
-		if (!current(state) || purgeFailed || countCleanupFailed || state.queue == null || state.paused || state.call != null || state.retry != null) return;
+		if (!current(state) || purgeFailed || state.queue == null || state.paused || state.call != null || state.retry != null) return;
 		List<DurableDropQueue.Entry> batch = state.queue.batch(state.individual);
 		if (batch.isEmpty()) return;
 		Call call = http.newCall(new Request.Builder().url(endpoint)
@@ -479,7 +444,6 @@ final class DropClient
 		final PairingClient.Credentials credentials;
 		final SyncContext context;
 		volatile boolean revoked;
-		volatile boolean shareCounts;
 		volatile boolean missed;
 		volatile Call call;
 		volatile ScheduledFuture<?> retry;

@@ -35,13 +35,13 @@ final class RuneGlassPanel extends PluginPanel
 	private final JLabel statusLabel = new JLabel();
 	private final JLabel codeLabel = new JLabel("—", SwingConstants.CENTER);
 	private final JTextArea detailText = textArea("", 5);
-	private final JTextArea dropStatusText = textArea("Drop sync is off. Enable 50K+ stack and notable reward history separately in plugin configuration.", 10);
+	private final JTextArea dropStatusText = textArea("Drop history is off. Enable RuneGlass sync in plugin configuration to save 50K+ stacks and notable rewards.", 10);
 	private final JButton actionButton = new JButton();
 	private final JButton manualButton = new JButton("Sync now");
 
 	private boolean stopAction;
 	private boolean dropCaptureAvailable = true;
-	private String dropStatus = "Drop sync is off. Enable 50K+ stack and notable reward history separately in plugin configuration.";
+	private String dropStatus = "Drop history is off. Enable RuneGlass sync in plugin configuration to save 50K+ stacks and notable rewards.";
 
 	RuneGlassPanel(Runnable startPairing, Runnable stopPairing, Runnable manualSync)
 	{
@@ -304,7 +304,7 @@ final class RuneGlassPanel extends PluginPanel
 	void showQuestPaused()
 	{
 		onEdt(() -> update("Connected · quest sync paused", "PARTIAL",
-			"Skills and XP remain connected. Toggle Sync quests and quest points off and on to resume quest updates.",
+			"Skills and XP remain connected. Log out and back in to resume quest updates.",
 			"Forget client", true, true, true, true));
 	}
 
@@ -313,7 +313,7 @@ final class RuneGlassPanel extends PluginPanel
 		onEdt(() -> update(
 			"Connected · bird house sync paused",
 			"PARTIAL",
-			"Skills and XP remain connected. Toggle Sync bird house timers off and on to resume bird house updates.",
+			"Skills and XP remain connected. Log out and back in to resume bird house updates.",
 			"Forget client",
 			true,
 			true,
@@ -326,7 +326,7 @@ final class RuneGlassPanel extends PluginPanel
 		onEdt(() -> update(
 			"Connected · farming sync paused",
 			"PARTIAL",
-			"Skills, XP, and other timers remain connected. Toggle Sync farming timers off and on to resume farming updates.",
+			"Skills, XP, and other timers remain connected. Log out and back in to resume farming updates.",
 			"Forget client",
 			true,
 			true,

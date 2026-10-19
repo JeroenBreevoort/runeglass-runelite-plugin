@@ -144,45 +144,6 @@ final class DurableDropQueue
 		if (root.exists()) root.deleteRecursively();
 	}
 
-	static Filepath countRevocationMarker(Filepath root)
-	{
-		return root.getParent().joinSegment(root.getFileName() + ".counts-revoked");
-	}
-
-	static void stripCountEvidence(Filepath root, Gson gson) throws IOException
-	{
-		Filepath marker = countRevocationMarker(root);
-		if (root.exists())
-		{
-			PrivateFiles.write(marker, marker.getFileName() + ".", new byte[]{1});
-			List<Filepath> files;
-			try (Stream<Filepath> paths = root.walk(2))
-			{
-				files = paths.filter(Filepath::isFile).collect(Collectors.toList());
-			}
-			for (Filepath path : files)
-			{
-				String name = path.getFileName();
-				if (name.equals(DropContinuityStore.FILE)
-					|| (name.startsWith(DropContinuityStore.FILE + ".") && name.endsWith(PrivateFiles.TEMPORARY_SUFFIX)))
-				{
-					path.deleteIfExists();
-				}
-			}
-			for (Filepath path : files)
-			{
-				String name = path.getFileName();
-				if (!path.exists() || (path.getParent().equals(root) && name.endsWith(".discard"))) continue;
-				if (path.size() > MAX_BATCH_BYTES) throw new IOException("Oversized pending drop");
-				JsonObject body = gson.fromJson(PrivateFiles.readUtf8(path), JsonObject.class);
-				validate(body, path.getParent().getFileName());
-				if (DropEvent.removeCountEvidence(body.getAsJsonArray("events").get(0).getAsJsonObject()))
-					PrivateFiles.write(path, name + ".", gson.toJson(body).getBytes(StandardCharsets.UTF_8));
-			}
-		}
-		marker.deleteIfExists();
-	}
-
 	private static boolean sameEnvelope(JsonObject left, JsonObject right)
 	{
 		return left.get("connectionId").equals(right.get("connectionId"))

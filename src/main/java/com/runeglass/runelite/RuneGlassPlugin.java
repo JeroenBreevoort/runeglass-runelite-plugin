@@ -186,7 +186,7 @@ public class RuneGlassPlugin extends Plugin
 			() -> clientThread.invokeLater(this::stopPairing),
 			() -> clientThread.invokeLater(this::requestManualSync));
 		panel.showDropCaptureAvailable(lootTrackerRunning);
-		if (config.syncEnabled() && config.dropSyncEnabled())
+		if (config.syncEnabled())
 		{
 			panel.showDropStatus("Drop sync enabled. Log in and pair this profile; Loot Tracker must be enabled.");
 		}
@@ -271,16 +271,12 @@ public class RuneGlassPlugin extends Plugin
 				}
 			});
 		}
-		if (!config.syncEnabled() || !config.dropSyncEnabled())
+		if (!config.syncEnabled())
 		{
 			if (dropClient != null)
 			{
 				dropClient.discardAll();
 			}
-		}
-		else if (dropClient != null && !config.dropCountSyncEnabled())
-		{
-			dropClient.revokeCountSharing();
 		}
 		else if (directory == null)
 		{
@@ -445,7 +441,7 @@ public class RuneGlassPlugin extends Plugin
 	public void onVarbitChanged(VarbitChanged event)
 	{
 		if (canCaptureDropCounts()) updateDropContext();
-		if (config.syncEnabled() && config.questSyncEnabled() && session.isActive())
+		if (config.syncEnabled() && session.isActive())
 		{
 			questReducer.markDirty();
 		}
@@ -459,15 +455,12 @@ public class RuneGlassPlugin extends Plugin
 			return;
 		}
 		String key = event.getKey();
-		if (("dropCountSyncEnabled".equals(key) && !config.dropCountSyncEnabled())
-			|| ("dropSyncEnabled".equals(key) && !config.dropSyncEnabled())
-			|| ("syncEnabled".equals(key) && !config.syncEnabled()))
+		if ("syncEnabled".equals(key) && !config.syncEnabled())
 		{
 			stopDropChat();
 			if (dropClient != null)
 			{
-				if ("dropCountSyncEnabled".equals(key)) dropClient.revokeCountSharing();
-				else dropClient.discardAll();
+				dropClient.discardAll();
 			}
 		}
 		clientThread.invokeLater(() -> handleConfigChanged(key));
@@ -475,86 +468,6 @@ public class RuneGlassPlugin extends Plugin
 
 	private void handleConfigChanged(String key)
 	{
-		if ("dropCountSyncEnabled".equals(key))
-		{
-			stopDropChat();
-			if (dropClient != null && !config.dropCountSyncEnabled()) dropClient.revokeCountSharing();
-			connectDropTransport();
-			dropCorrelator.flush(this::publishDropWithoutCounts);
-			dropGameContext.clear();
-			updateDropChatSubscription();
-			return;
-		}
-		if ("dropSyncEnabled".equals(key))
-		{
-			if (dropClient != null)
-			{
-				if (!config.syncEnabled() || !config.dropSyncEnabled()) { clearDropEvidence(); dropClient.discardAll(); }
-				else connectDropTransport();
-			}
-			else if (storageSettled && config.syncEnabled() && config.dropSyncEnabled())
-			{
-				showDropStorageUnavailable();
-			}
-			return;
-		}
-		if ("questSyncEnabled".equals(key))
-		{
-			discardQuestCapture();
-			if (config.syncEnabled() && config.questSyncEnabled() && client.getGameState() == GameState.LOGGED_IN)
-			{
-				connectQuestTransport();
-			}
-			return;
-		}
-		if ("birdHouseSyncEnabled".equals(key))
-		{
-			birdHouseReducer.reset();
-			if (birdHouseClient != null)
-			{
-				birdHouseClient.discard();
-			}
-			if (config.syncEnabled()
-				&& config.birdHouseSyncEnabled()
-				&& client.getGameState() == GameState.LOGGED_IN)
-			{
-				connectBirdHouseTransport();
-				captureBirdHouses();
-			}
-			return;
-		}
-		if ("farmingPatchSyncEnabled".equals(key))
-		{
-			farmingPatchReducer.reset();
-			if (farmingPatchClient != null)
-			{
-				farmingPatchClient.discard();
-			}
-			if (config.syncEnabled()
-				&& config.farmingPatchSyncEnabled()
-				&& client.getGameState() == GameState.LOGGED_IN)
-			{
-				connectFarmingPatchTransport();
-				captureFarmingPatch();
-			}
-			return;
-		}
-		if ("appearanceSyncEnabled".equals(key))
-		{
-			resetAppearanceCapture();
-			if (appearanceClient != null)
-			{
-				appearanceClient.discard();
-			}
-			if (config.syncEnabled()
-				&& config.appearanceSyncEnabled()
-				&& client.getGameState() == GameState.LOGGED_IN)
-			{
-				connectAppearanceTransport();
-				appearanceDirty = true;
-			}
-			return;
-		}
 		if (!"syncEnabled".equals(key))
 		{
 			return;
@@ -696,7 +609,6 @@ public class RuneGlassPlugin extends Plugin
 		SemanticSnapshotClient<BirdHouseSnapshot> currentClient = birdHouseClient;
 		Player localPlayer = client.getLocalPlayer();
 		if (!config.syncEnabled()
-			|| !config.birdHouseSyncEnabled()
 			|| baselineGate.isWaiting()
 			|| activeCredentials == null
 			|| currentClient == null
@@ -736,7 +648,7 @@ public class RuneGlassPlugin extends Plugin
 	private void captureQuests(boolean manual)
 	{
 		SemanticSnapshotClient<QuestSnapshot> currentClient = questClient;
-		if (currentClient == null || !currentClient.isConnected() || !config.syncEnabled() || !config.questSyncEnabled()
+		if (currentClient == null || !currentClient.isConnected() || !config.syncEnabled()
 			|| !session.isActive() || baselineGate.isWaiting() || activeCredentials == null
 			|| client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
 			|| (!manual && !questReducer.shouldCapture())) return;
@@ -761,16 +673,9 @@ public class RuneGlassPlugin extends Plugin
 		}
 	}
 
-	private void connectQuestTransport()
-	{
-		if (activeCredentials == null || syncSessionId == null || baselineGate.isWaiting()) return;
-		try { connectQuestTransport(activeCredentials, SyncContext.capture(client, syncSessionId)); }
-		catch (RuntimeException exception) { discardQuestCapture(); }
-	}
-
 	private void connectQuestTransport(PairingClient.Credentials credentials, SyncContext context)
 	{
-		if (!config.syncEnabled() || !config.questSyncEnabled() || questClient == null
+		if (!config.syncEnabled() || questClient == null
 			|| activeCredentials == null || !activeCredentials.sameConnection(credentials)) return;
 		questReducer.reset();
 		questClient.connect(credentials, context, new SemanticSnapshotClient.Listener()
@@ -800,7 +705,6 @@ public class RuneGlassPlugin extends Plugin
 		SemanticSnapshotClient<FarmingPatchSnapshot> currentClient = farmingPatchClient;
 		Player localPlayer = client.getLocalPlayer();
 		if (!config.syncEnabled()
-			|| !config.farmingPatchSyncEnabled()
 			|| baselineGate.isWaiting()
 			|| activeCredentials == null
 			|| currentClient == null
@@ -832,31 +736,12 @@ public class RuneGlassPlugin extends Plugin
 		}
 	}
 
-	private void connectBirdHouseTransport()
-	{
-		PairingClient.Credentials credentials = activeCredentials;
-		UUID sessionId = syncSessionId;
-		if (credentials == null || sessionId == null)
-		{
-			return;
-		}
-		try
-		{
-			connectBirdHouseTransport(credentials, SyncContext.capture(client, sessionId));
-		}
-		catch (RuntimeException exception)
-		{
-			handleBirdHouseFailure(credentials, SemanticSnapshotClient.Failure.REJECTED_SNAPSHOT);
-		}
-	}
-
 	private void connectBirdHouseTransport(
 		PairingClient.Credentials credentials,
 		SyncContext context)
 	{
 		SemanticSnapshotClient<BirdHouseSnapshot> currentClient = birdHouseClient;
-		if (!config.birdHouseSyncEnabled()
-			|| currentClient == null
+		if (currentClient == null
 			|| activeCredentials == null
 			|| !activeCredentials.sameConnection(credentials))
 		{
@@ -924,33 +809,12 @@ public class RuneGlassPlugin extends Plugin
 		}
 	}
 
-	private void connectFarmingPatchTransport()
-	{
-		PairingClient.Credentials credentials = activeCredentials;
-		UUID sessionId = syncSessionId;
-		if (credentials == null || sessionId == null)
-		{
-			return;
-		}
-		try
-		{
-			connectFarmingPatchTransport(credentials, SyncContext.capture(client, sessionId));
-		}
-		catch (RuntimeException exception)
-		{
-			handleFarmingPatchFailure(
-				credentials,
-				SemanticSnapshotClient.Failure.REJECTED_SNAPSHOT);
-		}
-	}
-
 	private void connectFarmingPatchTransport(
 		PairingClient.Credentials credentials,
 		SyncContext context)
 	{
 		SemanticSnapshotClient<FarmingPatchSnapshot> currentClient = farmingPatchClient;
-		if (!config.farmingPatchSyncEnabled()
-			|| currentClient == null
+		if (currentClient == null
 			|| activeCredentials == null
 			|| !activeCredentials.sameConnection(credentials))
 		{
@@ -1025,7 +889,6 @@ public class RuneGlassPlugin extends Plugin
 		if (!appearanceDirty
 			|| appearanceEncoding
 			|| !config.syncEnabled()
-			|| !config.appearanceSyncEnabled()
 			|| baselineGate.isWaiting()
 			|| activeCredentials == null
 			|| currentClient == null
@@ -1122,7 +985,6 @@ public class RuneGlassPlugin extends Plugin
 		appearanceEncoding = false;
 		if (expectedGeneration != appearanceGeneration
 			|| !config.syncEnabled()
-			|| !config.appearanceSyncEnabled()
 			|| activeCredentials == null
 			|| !activeCredentials.sameConnection(expectedCredentials)
 			|| appearanceClient == null)
@@ -1146,31 +1008,12 @@ public class RuneGlassPlugin extends Plugin
 		}
 	}
 
-	private void connectAppearanceTransport()
-	{
-		PairingClient.Credentials credentials = activeCredentials;
-		UUID sessionId = syncSessionId;
-		if (credentials == null || sessionId == null)
-		{
-			return;
-		}
-		try
-		{
-			connectAppearanceTransport(credentials, SyncContext.capture(client, sessionId));
-		}
-		catch (RuntimeException exception)
-		{
-			handleAppearanceFailure(credentials, SemanticSnapshotClient.Failure.REJECTED_SNAPSHOT);
-		}
-	}
-
 	private void connectAppearanceTransport(
 		PairingClient.Credentials credentials,
 		SyncContext context)
 	{
 		SemanticSnapshotClient<AppearanceSnapshot> currentClient = appearanceClient;
-		if (!config.appearanceSyncEnabled()
-			|| currentClient == null
+		if (currentClient == null
 			|| activeCredentials == null
 			|| !activeCredentials.sameConnection(credentials))
 		{
@@ -1460,10 +1303,10 @@ public class RuneGlassPlugin extends Plugin
 		connectQuestTransport(credentials, context);
 		connectFarmingPatchTransport(credentials, context);
 		connectAppearanceTransport(credentials, context);
-		if (dropClient != null && config.dropSyncEnabled()
+		if (dropClient != null
 			&& RuneScapeProfileType.getCurrent(client) == RuneScapeProfileType.STANDARD)
 		{
-			dropClient.connect(credentials, context, activeProfileKey, config.dropCountSyncEnabled());
+			dropClient.connect(credentials, context, activeProfileKey);
 			updateDropChatSubscription();
 		}
 		try
@@ -1727,12 +1570,6 @@ public class RuneGlassPlugin extends Plugin
 		try
 		{
 			DropCaptureResult result = dropCapture.capture(event, itemManager, syncSessionId, Instant.now());
-			if (!config.dropCountSyncEnabled())
-			{
-				if (result.event().isPresent()) currentClient.publish(result.event().get());
-				else if (result.reason() == DropCaptureResult.Reason.INVALID_REWARD) currentClient.captureFailed();
-				return result;
-			}
 			String encounter = updateDropContext();
 			dropCorrelator.loot(result, client.getTickCount(), System.nanoTime(), encounter, this::publishCorrelatedDrop);
 			return result;
@@ -1768,7 +1605,7 @@ public class RuneGlassPlugin extends Plugin
 
 	private boolean canCaptureDropCounts()
 	{
-		return dropClient != null && config.dropCountSyncEnabled() && dropCaptureBlocker(dropClient) == null;
+		return dropClient != null && dropCaptureBlocker(dropClient) == null;
 	}
 
 	private synchronized void updateDropChatSubscription()
@@ -1811,15 +1648,8 @@ public class RuneGlassPlugin extends Plugin
 
 	private void publishCorrelatedDrop(DropCorrelator.Completed completed)
 	{
-		if (dropClient == null || !config.syncEnabled() || !config.dropSyncEnabled()) return;
-		if (config.dropCountSyncEnabled()) dropClient.observe(completed);
-		else publishDropWithoutCounts(completed);
-	}
-
-	private void publishDropWithoutCounts(DropCorrelator.Completed completed)
-	{
-		if (dropClient == null || !config.syncEnabled() || !config.dropSyncEnabled()) return;
-		completed.result.event().ifPresent(event -> dropClient.publish(event.withoutCountEvidence()));
+		if (dropClient == null || !config.syncEnabled()) return;
+		dropClient.observe(completed);
 	}
 
 	private void flushDropEvidence()
@@ -1840,7 +1670,6 @@ public class RuneGlassPlugin extends Plugin
 	{
 		if (currentClient == null) return DropCaptureResult.Reason.PLUGIN_STOPPED;
 		if (!config.syncEnabled()) return DropCaptureResult.Reason.SYNC_OFF;
-		if (!config.dropSyncEnabled()) return DropCaptureResult.Reason.DROP_SYNC_OFF;
 		if (!lootTrackerRunning) return DropCaptureResult.Reason.LOOT_TRACKER_OFF;
 		if (client.getGameState() != GameState.LOGGED_IN) return DropCaptureResult.Reason.LOGGED_OUT;
 		if (!session.isActive() || syncSessionId == null) return DropCaptureResult.Reason.SESSION_INACTIVE;
@@ -1862,14 +1691,14 @@ public class RuneGlassPlugin extends Plugin
 
 	private void connectDropTransport()
 	{
-		if (dropClient == null || !config.syncEnabled() || !config.dropSyncEnabled()
+		if (dropClient == null || !config.syncEnabled()
 			|| activeCredentials == null || syncSessionId == null || baselineGate.isWaiting()
 			|| RuneScapeProfileType.getCurrent(client) != RuneScapeProfileType.STANDARD
 			|| client.getGameState() != GameState.LOGGED_IN
 			|| needsProfileRestart(configManager.getRSProfileKey())) return;
 		try
 		{
-			dropClient.connect(activeCredentials, SyncContext.capture(client, syncSessionId), activeProfileKey, config.dropCountSyncEnabled());
+			dropClient.connect(activeCredentials, SyncContext.capture(client, syncSessionId), activeProfileKey);
 			updateDropChatSubscription();
 		}
 		catch (RuntimeException exception)

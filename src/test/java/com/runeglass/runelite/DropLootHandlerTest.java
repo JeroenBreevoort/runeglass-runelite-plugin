@@ -34,7 +34,6 @@ public class DropLootHandlerTest
 
 	@Test public void actualChatHandlerIgnoresPlayersAndCorrelatesGameFactsBeforeLocalSave() throws Exception
 	{
-		fixture.enableCounts();
 		fixture.eventBus.post(new net.runelite.api.events.ChatMessage(null, net.runelite.api.ChatMessageType.PUBLICCHAT,
 			"Other player", "Your Vorkath kill count is: 999.", null, 0));
 		fixture.eventBus.post(new net.runelite.api.events.ChatMessage(null, net.runelite.api.ChatMessageType.GAMEMESSAGE,
@@ -57,7 +56,6 @@ public class DropLootHandlerTest
 	@Test public void everyGuardReportsItsReasonWithoutReadingTheLoot() throws Exception
 	{
 		assertBlocked(DropCaptureResult.Reason.SYNC_OFF, () -> fixture.syncEnabled = false, () -> fixture.syncEnabled = true);
-		assertBlocked(DropCaptureResult.Reason.DROP_SYNC_OFF, () -> fixture.dropSyncEnabled = false, () -> fixture.dropSyncEnabled = true);
 		assertBlocked(DropCaptureResult.Reason.LOOT_TRACKER_OFF, () -> set("lootTrackerRunning", false), () -> set("lootTrackerRunning", true));
 		assertBlocked(DropCaptureResult.Reason.LOGGED_OUT, () -> fixture.gameState = GameState.LOGIN_SCREEN, () -> fixture.gameState = GameState.LOGGED_IN);
 		assertBlocked(DropCaptureResult.Reason.SESSION_INACTIVE, () -> set("syncSessionId", null), () -> set("syncSessionId", DropHandlerFixture.SESSION));
@@ -115,12 +113,12 @@ public class DropLootHandlerTest
 		assertTrue(observed.isEmpty());
 
 		fixture.plugin.onLootReceived(coins(1));
-		fixture.dropSyncEnabled = false;
+		fixture.syncEnabled = false;
 		fixture.plugin.onLootReceived(coins(50_000));
 		assertEquals(2, observed.size());
 		assertEquals(DropCaptureResult.Reason.BELOW_THRESHOLD, observed.get(0).reason());
 		DropCaptureResult blocked = observed.get(1);
-		assertEquals(DropCaptureResult.Reason.DROP_SYNC_OFF, blocked.reason());
+		assertEquals(DropCaptureResult.Reason.SYNC_OFF, blocked.reason());
 		assertFalse(blocked.sourceType().isPresent());
 		assertEquals(0, blocked.itemStacks());
 		assertFalse(blocked.highestStackGp().isPresent());

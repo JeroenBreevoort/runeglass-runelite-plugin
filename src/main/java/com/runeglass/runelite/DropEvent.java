@@ -75,24 +75,6 @@ final class DropEvent
 		return new DropEvent(frozen);
 	}
 
-	static boolean removeCountEvidence(JsonObject event)
-	{
-		boolean changed = event.getAsJsonObject("source").remove("npcId") != null;
-		changed |= event.remove("sourceCount") != null;
-		changed |= event.remove("continuity") != null;
-		changed |= event.remove("collectionLog") != null;
-		for (com.google.gson.JsonElement element : event.getAsJsonArray("items"))
-			changed |= element.getAsJsonObject().remove("newCollectionLogSlot") != null;
-		return changed;
-	}
-
-	DropEvent withoutCountEvidence()
-	{
-		JsonObject plain = json.deepCopy();
-		removeCountEvidence(plain);
-		return new DropEvent(plain);
-	}
-
 	String eventId()
 	{
 		return json.get("eventId").getAsString();

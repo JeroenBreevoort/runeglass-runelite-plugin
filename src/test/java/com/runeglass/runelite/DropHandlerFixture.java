@@ -56,8 +56,6 @@ final class DropHandlerFixture implements AutoCloseable
 	volatile int tick = 100;
 	volatile int collectionLogSetting = 1;
 	volatile boolean syncEnabled = true;
-	volatile boolean dropSyncEnabled = true;
-	volatile boolean dropCountSyncEnabled;
 	final EventBus eventBus = new EventBus();
 	final AtomicInteger evidenceReads = new AtomicInteger();
 	volatile GameState gameState = GameState.LOGGED_IN;
@@ -120,8 +118,6 @@ final class DropHandlerFixture implements AutoCloseable
 		RuneGlassConfig config = new RuneGlassConfig()
 		{
 			@Override public boolean syncEnabled() { return syncEnabled; }
-			@Override public boolean dropSyncEnabled() { return dropSyncEnabled; }
-			@Override public boolean dropCountSyncEnabled() { return dropCountSyncEnabled; }
 		};
 		Constructor<ConfigManager> configConstructor = ConfigManager.class.getDeclaredConstructor(String.class,
 			ScheduledExecutorService.class, EventBus.class, Client.class, Gson.class,
@@ -156,32 +152,22 @@ final class DropHandlerFixture implements AutoCloseable
 		setField(plugin, "syncSessionId", SESSION);
 		setField(plugin, "lootTrackerRunning", true);
 		((SkillsSyncSession) getField(plugin, "session")).start();
-		dropClient.connect(CREDENTIALS, DropCaptureTest.CONTEXT);
+		dropClient.connect(CREDENTIALS, DropCaptureTest.CONTEXT, "fixture-profile");
 		drainTransport();
 		plugin.advanceDropEvidence();
 		tick += 6;
 		plugin.advanceDropEvidence();
 	}
 
-	void changeCountConsent(boolean enabled) throws Exception
+	void changeSyncConsent(boolean enabled) throws Exception
 	{
-		dropCountSyncEnabled = enabled;
+		syncEnabled = enabled;
 		net.runelite.client.events.ConfigChanged event = new net.runelite.client.events.ConfigChanged();
 		event.setGroup(RuneGlassConfig.GROUP);
-		event.setKey("dropCountSyncEnabled");
+		event.setKey("syncEnabled");
 		event.setNewValue(Boolean.toString(enabled));
 		plugin.onConfigChanged(event);
 		drainTransport();
-	}
-
-	void enableCounts() throws Exception
-	{
-		dropCountSyncEnabled = true;
-		dropClient.connect(CREDENTIALS, DropCaptureTest.CONTEXT, "fixture-profile", true);
-		drainTransport();
-		plugin.advanceDropEvidence();
-		tick += 6;
-		plugin.advanceDropEvidence();
 	}
 
 	void drainTransport() throws Exception

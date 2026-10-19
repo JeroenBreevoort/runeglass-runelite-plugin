@@ -73,23 +73,6 @@ public class DurableDropQueueTest
 		assertEquals(2, queue.size());
 	}
 
-	@Test public void countRevocationLeavesLegacyPayloadAndDiskBytesIdentical() throws Exception
-	{
-		Filepath root = root().joinSegment("drops-v1");
-		DurableDropQueue queue = new DurableDropQueue(root, "connection", gson);
-		DropEvent event = DropCaptureTest.notedDrop(123);
-		JsonObject original = event.envelope(DropCaptureTest.CONTEXT, "connection");
-		assertEquals(gson.toJson(original), gson.toJson(event.withoutCountEvidence().envelope(DropCaptureTest.CONTEXT, "connection")));
-		queue.append(original);
-		Path path = TestStorage.path(queue.batch(false).get(0).path);
-		String unusualWhitespace = "\n " + Files.readString(path) + "\n";
-		Files.writeString(path, unusualWhitespace);
-		DurableDropQueue.stripCountEvidence(root, gson);
-		assertEquals(unusualWhitespace, Files.readString(path));
-		assertEquals(original, new DurableDropQueue(root, "connection", gson).batch(false).get(0).body);
-		assertFalse(root.joinSegment("connection").joinSegment(DropContinuityStore.FILE).exists());
-	}
-
 	@Test public void damagedRecordDoesNotDestroyOrBlockHealthyRecords() throws Exception
 	{
 		Filepath root = root();

@@ -54,7 +54,6 @@ public class ManualQuestSyncTest
 	private QuestSnapshotReducer reducer;
 	private SkillsSyncSession session;
 	private boolean masterEnabled = true;
-	private boolean questEnabled = true;
 	private GameState gameState = GameState.LOGGED_IN;
 	private Player localPlayer;
 	private int questPoints = 1;
@@ -106,10 +105,6 @@ public class ManualQuestSyncTest
 			switch (method.getName())
 			{
 				case "syncEnabled": return masterEnabled;
-				case "questSyncEnabled": return questEnabled;
-				case "birdHouseSyncEnabled":
-				case "farmingPatchSyncEnabled":
-				case "appearanceSyncEnabled": return false;
 				default: throw new AssertionError("Unexpected config read " + method.getName());
 			}
 		});
@@ -190,10 +185,6 @@ public class ManualQuestSyncTest
 		masterEnabled = false;
 		assertNoQuestCapture();
 		masterEnabled = true;
-		questEnabled = false;
-		assertNoQuestCapture();
-		assertEquals("manual_sync", ((SkillsSnapshot) getField(plugin, "latestSnapshot")).getReason());
-		questEnabled = true;
 		session.cancel();
 		assertNoQuestCapture();
 		session.start();

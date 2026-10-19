@@ -30,7 +30,6 @@ public class QuestCaptureLifecycleTest
 	private SemanticSnapshotClient<QuestSnapshot> transport;
 	private RuneGlassPlugin plugin;
 	private boolean masterEnabled;
-	private boolean questEnabled;
 	private CountDownLatch retryScheduled;
 
 	@Before
@@ -47,11 +46,9 @@ public class QuestCaptureLifecycleTest
 				context, connectionId, snapshot.getSnapshotId(), snapshot.getObservedAt(), "progress", snapshot.getProgress()));
 		plugin = new RuneGlassPlugin();
 		masterEnabled = true;
-		questEnabled = true;
 		RuneGlassConfig config = (RuneGlassConfig) Proxy.newProxyInstance(RuneGlassConfig.class.getClassLoader(), new Class<?>[]{RuneGlassConfig.class}, (proxy, method, args) ->
 		{
 			if ("syncEnabled".equals(method.getName())) return masterEnabled;
-			if ("questSyncEnabled".equals(method.getName())) return questEnabled;
 			throw new AssertionError("Unexpected config read " + method.getName());
 		});
 		setField("config", config);
@@ -75,15 +72,6 @@ public class QuestCaptureLifecycleTest
 		transport.discard();
 		executor.shutdownNow();
 		server.shutdown();
-	}
-
-	@Test
-	public void questOptOutDiscardsAnAlreadyQueuedRetry() throws Exception
-	{
-		queueRetry();
-		questEnabled = false;
-		invoke("handleConfigChanged", String.class, "questSyncEnabled");
-		assertDiscarded();
 	}
 
 	@Test

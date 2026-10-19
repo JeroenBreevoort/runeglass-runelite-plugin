@@ -387,7 +387,7 @@ public class PluginStorageMigrationTest
 		incoming.cancel();
 	}
 
-	private RuneGlassPlugin plugin(boolean dropSyncEnabled) throws Exception
+	private RuneGlassPlugin plugin(boolean syncEnabled) throws Exception
 	{
 		RuneGlassPlugin plugin = new RuneGlassPlugin();
 		Client client = (Client) Proxy.newProxyInstance(Client.class.getClassLoader(), new Class<?>[]{Client.class}, (proxy, method, args) ->
@@ -400,8 +400,7 @@ public class PluginStorageMigrationTest
 		});
 		RuneGlassConfig config = new RuneGlassConfig()
 		{
-			@Override public boolean syncEnabled() { return true; }
-			@Override public boolean dropSyncEnabled() { return dropSyncEnabled; }
+			@Override public boolean syncEnabled() { return syncEnabled; }
 		};
 		ClientThread clientThread = new ClientThread()
 		{
